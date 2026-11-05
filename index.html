@@ -3176,7 +3176,7 @@
                 <div class="p-2.5 rounded-xl bg-[#0D1117] border border-[#30363D] flex items-center justify-between text-xs">
                   <div>
                     <span class="font-bold text-white">${p.date}</span>
-                    <span class="text-[#8B949E] ml-2">• ${p.count} тренировок</span>
+                    <span class="text-[#8B949E] ml-2">• ${p.total_sessions || (student.subscription && student.subscription.total) || 12} тренировок</span>
                   </div>
                   <div class="flex items-center gap-2">
                     <span class="font-bold text-white">${p.amount}</span>
