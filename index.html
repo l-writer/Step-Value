@@ -13,116 +13,184 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
   <!-- 1. Подключаем Supabase JS SDK -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
-<script>
+  <script>
     const SUPABASE_URL = 'https://qmijcqlgdyyvuumwannu.supabase.co';
     const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFtaWpjcWxnZHl5dnV1bXdhbm51Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM3ODkxOTIsImV4cCI6MjEwOTM2NTE5Mn0.R412gCNyzGOayLajg039ZM4w5MBqFY59zaEjQm3YgIQ';
 
-    const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    const supabaseClient = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
     let currentUser = null;
+    let currentSubscription = null;
 
-    async function authenticateUser(role) {
+    function notifyUser(msg, type = 'success') {
+      if (typeof showToast === 'function') {
+        showToast(msg, type);
+      } else {
+        console.log(`[${type.toUpperCase()}]`, msg);
+      }
+    }
+
+    function syncSupabaseStateToLocalApp(user, sub, bookings, preferredStudentId = null) {
+      if (typeof appData === 'undefined' || !appData || !Array.isArray(appData.students)) return;
+      if (!user || !user.id) return;
+
+      let student = null;
+      if (preferredStudentId) {
+        student = appData.students.find(s => s.id === preferredStudentId || s.access_code === preferredStudentId);
+      }
+      if (!student) {
+        student = appData.students.find(s => s.id === user.id || s.supabase_id === user.id);
+      }
+      if (!student) {
+        student = appData.students.find(s => s.id === appData.current_student_id) || appData.students[0];
+      }
+      if (!student) return;
+
+      const oldId = student.id;
+      const newId = user.id;
+
+      // Синхронизируем UUID пользователя между профилем и слотами расписания
+      if (oldId !== newId) {
+        student.id = newId;
+        student.supabase_id = newId;
+        if (appData.current_student_id === oldId) {
+          appData.current_student_id = newId;
+        }
+        if (appData.schedule_slots) {
+          Object.keys(appData.schedule_slots).forEach(dateKey => {
+            (appData.schedule_slots[dateKey] || []).forEach(slot => {
+              if (slot.booked_by === oldId) {
+                slot.booked_by = newId;
+              }
+            });
+          });
+        }
+      } else {
+        student.supabase_id = newId;
+      }
+
+      if (user.name && !user.name.startsWith('Демо ')) {
+        student.full_name = user.name;
+      }
+
+      if (sub) {
+        currentSubscription = sub;
+        const total = Number(sub.total_sessions) || 12;
+        const used = Number(sub.used_sessions) || 0;
+        const remaining = Math.max(0, total - used);
+        const dur = Number(sub.session_duration_minutes) || student.session_duration || 120;
+        const billDay = Number(sub.billing_day) || (student.subscription && student.subscription.payment_day) || 7;
+
+        student.session_duration = dur;
+        if (!student.subscription) student.subscription = {};
+        student.subscription.id = sub.id;
+        student.subscription.total = total;
+        student.subscription.used = used;
+        student.subscription.remaining = remaining;
+        student.subscription.payment_day = billDay;
+      }
+
+      if (Array.isArray(bookings)) {
+        const confirmed = bookings.filter(b => !b.status || b.status === 'confirmed');
+        // Если в Supabase есть реальные бронирования, синхронизируем их с локальной сеткой
+        if (confirmed.length > 0) {
+          if (appData.schedule_slots) {
+            Object.keys(appData.schedule_slots).forEach(dateKey => {
+              (appData.schedule_slots[dateKey] || []).forEach(slot => {
+                if (slot.booked_by === student.id) {
+                  slot.booked_by = null;
+                  slot.is_open = true;
+                }
+              });
+            });
+          }
+
+          student.active_bookings = confirmed.map(b => {
+            const dur = Number(b.duration_minutes) || student.session_duration || 120;
+            const dateStr = b.session_date;
+            const timeStr = b.session_time;
+            if (appData.schedule_slots && appData.schedule_slots[dateStr]) {
+              const daySlots = appData.schedule_slots[dateStr];
+              const startIdx = daySlots.findIndex(s => s.time === timeStr);
+              const hoursNeeded = Math.ceil(dur / 60);
+              if (startIdx !== -1) {
+                for (let k = 0; k < hoursNeeded; k++) {
+                  if (daySlots[startIdx + k]) {
+                    daySlots[startIdx + k].booked_by = student.id;
+                  }
+                }
+              }
+            }
+            return {
+              id: b.id || ('bk-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5)),
+              date: dateStr,
+              time: timeStr,
+              duration: dur
+            };
+          });
+          student.active_bookings.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+        }
+      }
+
+      if (typeof saveAppData === 'function') {
+        saveAppData();
+      }
+    }
+
+    async function getOrCreateSupabaseUser(role = 'student', options = {}) {
+  const normalizedDbRole = (role === 'trainer' || role === 'coach') ? 'coach' : 'student';
+  const preferredStudent = options.student || null;
+
   try {
-    // 1. Проверяем данные из Telegram WebApp, если запущено в Telegram
+    if (!supabaseClient) {
+      throw new Error('Supabase SDK не инициализирован');
+    }
+
     const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
-    const telegramId = tgUser?.id ? String(tgUser.id) : "999999999";
-    const userName = tgUser?.first_name 
-      ? (tgUser.first_name + (tgUser.last_name ? ' ' + tgUser.last_name : '')) 
-      : (role === 'coach' ? "Демо Тренер" : "Демо Ученик");
+    const telegramId = tgUser?.id ? Number(tgUser.id) : 999999999;
+    const firstName = tgUser?.first_name || (preferredStudent?.name ? preferredStudent.name.split(' ')[0] : (normalizedDbRole === 'coach' ? 'Денис' : 'Александр'));
+    const lastName = tgUser?.last_name || (preferredStudent?.name ? preferredStudent.name.split(' ').slice(1).join(' ') : 'Воронов');
+    const username = tgUser?.username || '';
 
-    console.log("Запрос авторизации для:", { telegramId, userName, role });
-
-    // 2. Ищем или создаем пользователя в Supabase
-    let { data: user, error } = await supabaseClient
+    // 1. Ищем пользователя по telegram_id
+    let { data: user, error: selectErr } = await supabaseClient
       .from('users')
       .select('*')
       .eq('telegram_id', telegramId)
       .maybeSingle();
 
-    if (error) throw error;
+    if (selectErr) console.warn("Supabase select warning:", selectErr);
 
+    // 2. Если нет — создаем с обязательным полем first_name
     if (!user) {
       const { data: newUser, error: createError } = await supabaseClient
         .from('users')
         .insert([{
           telegram_id: telegramId,
-          name: userName,
-          role: role
+          first_name: firstName,
+          last_name: lastName,
+          username: username,
+          role: normalizedDbRole
         }])
         .select()
         .single();
 
       if (createError) throw createError;
       user = newUser;
-
-      // Если это ученик, сразу создаем базовый абонемент
-      // Если это ученик, сразу создаем базовый абонемент
-      if (role === 'student') {
-        await supabaseClient.from('subscriptions').insert([{
-          student_id: user.id,
-          total_sessions: 12,
-          used_sessions: 0,
-          session_duration_minutes: 120,
-          billing_day: 7,
-          status: 'active'
-        }]);
-      }
     }
 
-    console.log("👤 Авторизован пользователь:", user);
-
-    // 3. Сохраняем сессию локально
-    localStorage.setItem('sv_user', JSON.stringify(user));
-    localStorage.setItem('sv_role', role);
-
-    // 4. Переключаем экран интерфейса
-    if (typeof state !== 'undefined') {
-      state.currentRole = role;
-      state.isOnboarded = true;
-    }
-    if (typeof uiState !== 'undefined') {
-      uiState.isOnboarded = true;
-    }
-
-    // Вызываем перерисовку приложения (если используется renderApp)
-    if (typeof renderApp === 'function') {
-      renderApp();
-    } else {
-      location.reload();
-    }
-
-  } catch (err) {
-    console.error("Ошибка авторизации Supabase:", err);
-  }
-}
-
-async function bookSession(date, time) {
-  try {
-    let rawUser = localStorage.getItem('sv_user');
-    if (!rawUser) {
-      await authenticateUser('student');
-      rawUser = localStorage.getItem('sv_user');
-    }
-    if (!rawUser) {
-      alert("Не удалось войти. Перезагрузите страницу.");
-      return false;
-    }
-    const user = JSON.parse(rawUser);
-
-    // 1. Проверяем абонемент
-    let { data: sub, error: subError } = await supabaseClient
+    // 3. Синхронизируем абонемент
+    let { data: sub } = await supabaseClient
       .from('subscriptions')
       .select('*')
       .eq('student_id', user.id)
       .eq('status', 'active')
       .maybeSingle();
 
-    if (subError) throw subError;
-
     if (!sub) {
-      const { data: newSub, error: insErr } = await supabaseClient
+      const { data: newSub, error: subCreateErr } = await supabaseClient
         .from('subscriptions')
         .insert([{
           student_id: user.id,
@@ -134,44 +202,143 @@ async function bookSession(date, time) {
         }])
         .select()
         .single();
-      if (insErr) throw insErr;
-      sub = newSub;
+
+      if (!subCreateErr) sub = newSub;
     }
 
-    if ((sub.total_sessions - sub.used_sessions) <= 0) {
-      alert("Закончились тренировки в абонементе!");
-      return false;
-    }
+    localStorage.setItem('sv_user', JSON.stringify(user));
+    if (sub) localStorage.setItem('sv_sub', JSON.stringify(sub));
 
-    // 2. Добавляем запись в таблицу bookings
-    const { error: bookError } = await supabaseClient
-      .from('bookings')
-      .insert([{
-        student_id: user.id,
-        session_date: date,
-        session_time: time,
-        duration_minutes: sub.session_duration_minutes || 120,
-        status: 'confirmed'
-      }]);
-
-    if (bookError) throw bookError;
-
-    // 3. Списываем одно занятие
-    const { error: updateError } = await supabaseClient
-      .from('subscriptions')
-      .update({ used_sessions: sub.used_sessions + 1 })
-      .eq('id', sub.id);
-
-    if (updateError) throw updateError;
-
-    alert(`Тренировка забронирована на ${time}! Баланс списан.`);
-    return true;
+    return { user, sub };
   } catch (err) {
-    console.error("Ошибка бронирования:", err);
-    alert("Ошибка связи с базой данных.");
-    return false;
+    console.error("Ошибка в getOrCreateSupabaseUser:", err);
+    throw err;
   }
 }
+
+    const authenticateUser = getOrCreateSupabaseUser;
+
+    async function bookSession(date, time) {
+      try {
+        if (!supabaseClient) {
+          notifyUser('Ошибка связи с базой данных: клиент Supabase не загружен', 'error');
+          return null;
+        }
+
+        // 1. Проверяем или восстанавливаем авторизацию пользователя
+        let user = currentUser;
+        if (!user || !user.id) {
+          try {
+            const rawUser = localStorage.getItem('sv_user');
+            if (rawUser) user = JSON.parse(rawUser);
+          } catch (e) {}
+        }
+
+        if (!user || !user.id) {
+          const currentSt = typeof getCurrentStudent === 'function' ? getCurrentStudent() : null;
+          const authRes = await getOrCreateSupabaseUser('student', { autoEnter: true, student: currentSt });
+          user = authRes ? authRes.user : null;
+        }
+
+        if (!user || !user.id) {
+          notifyUser('Не удалось войти. Проверьте подключение и попробуйте снова.', 'error');
+          return null;
+        }
+
+        // 2. Проверяем реальный остаток занятий в таблице subscriptions в Supabase
+        let { data: subsList, error: subError } = await supabaseClient
+          .from('subscriptions')
+          .select('*')
+          .eq('student_id', user.id)
+          .eq('status', 'active')
+          .order('id', { ascending: false })
+          .limit(1);
+
+        if (subError) throw subError;
+
+        let sub = (subsList && subsList.length > 0) ? subsList[0] : null;
+
+        if (!sub) {
+          const { data: createdSubs, error: insErr } = await supabaseClient
+            .from('subscriptions')
+            .insert([{
+              student_id: user.id,
+              total_sessions: 12,
+              used_sessions: 0,
+              session_duration_minutes: 120,
+              billing_day: 7,
+              status: 'active'
+            }])
+            .select();
+          if (insErr) throw insErr;
+          sub = (createdSubs && createdSubs.length > 0) ? createdSubs[0] : null;
+        }
+
+        if (!sub) {
+          throw new Error('Не удалось найти или создать активный абонемент');
+        }
+
+        const totalSessions = Number(sub.total_sessions) || 0;
+        const usedSessions = Number(sub.used_sessions) || 0;
+        const remainingSessions = totalSessions - usedSessions;
+
+        if (remainingSessions <= 0) {
+          notifyUser('Закончились тренировки в абонементе! Обновите абонемент для записи.', 'error');
+          return null;
+        }
+
+        const durationMinutes = Number(sub.session_duration_minutes) || 120;
+
+        // 3. Добавляем строку в таблицу bookings
+        const { data: insertedBookings, error: bookError } = await supabaseClient
+          .from('bookings')
+          .insert([{
+            student_id: user.id,
+            session_date: date,
+            session_time: time,
+            duration_minutes: durationMinutes,
+            status: 'confirmed'
+          }])
+          .select();
+
+        if (bookError) throw bookError;
+        const createdBooking = (insertedBookings && insertedBookings.length > 0) ? insertedBookings[0] : null;
+
+        // 4. Обновляем счетчик used_sessions = used_sessions + 1 в subscriptions
+        const newUsedSessions = usedSessions + 1;
+        const { data: updatedSubs, error: updateError } = await supabaseClient
+          .from('subscriptions')
+          .update({ used_sessions: newUsedSessions })
+          .eq('id', sub.id)
+          .select();
+
+        if (updateError) throw updateError;
+
+        const updatedSub = (updatedSubs && updatedSubs.length > 0)
+          ? updatedSubs[0]
+          : { ...sub, used_sessions: newUsedSessions };
+
+        currentSubscription = updatedSub;
+
+        return {
+          success: true,
+          user,
+          sub: updatedSub,
+          booking: createdBooking || {
+            id: 'bk-' + Date.now(),
+            student_id: user.id,
+            session_date: date,
+            session_time: time,
+            duration_minutes: durationMinutes,
+            status: 'confirmed'
+          }
+        };
+      } catch (err) {
+        console.error('Ошибка бронирования в Supabase:', err);
+        notifyUser('Ошибка связи с базой данных: ' + (err.message || 'не удалось сохранить запись'), 'error');
+        return null;
+      }
+    }
   </script>
 
   <script>
@@ -1109,6 +1276,13 @@ async function bookSession(date, time) {
     function confirmResetDemoData() {
       appData = buildInitialSeedData();
       uiState.reschedulingBookingId = null;
+      uiState.onboardingMode = null;
+      currentUser = null;
+      currentSubscription = null;
+      try {
+        localStorage.removeItem('sv_role');
+        localStorage.removeItem('sv_user');
+      } catch (e) {}
       saveAppData();
       closeModal();
       showToast('Демо-данные восстановлены до исходного состояния');
@@ -1121,9 +1295,15 @@ async function bookSession(date, time) {
       uiState.onboardingMode = null;
       uiState.workoutEditorOpen = false;
       uiState.reschedulingBookingId = null;
+      try {
+        localStorage.removeItem('sv_role');
+        localStorage.removeItem('sv_user');
+      } catch (e) {}
+      currentUser = null;
+      currentSubscription = null;
       saveAppData();
       renderApp();
-      showToast('Выберите роль для входа и тестирования');
+      showToast('Выберите роль и профиль для входа');
     }
 
     function selectOnboardingMode(mode) {
@@ -1141,7 +1321,7 @@ async function bookSession(date, time) {
       }
     }
 
-    function submitTrainerPin() {
+    async function submitTrainerPin() {
       const input = document.getElementById('input-trainer-pin');
       const val = (input ? input.value : '').trim().toUpperCase();
       const expected = (appData.trainer_profile.master_pin || 'COACH2026').toUpperCase();
@@ -1149,15 +1329,19 @@ async function bookSession(date, time) {
         triggerHaptic('success');
         appData.current_role = 'trainer';
         uiState.onboardingMode = null;
+        try {
+          localStorage.setItem('sv_role', 'trainer');
+        } catch (e) {}
         saveAppData();
-        showToast(`Добро пожаловать, тренер ${appData.trainer_profile.full_name}!`);
         renderApp();
+        await getOrCreateSupabaseUser('coach', { autoEnter: true });
+        showToast(`Добро пожаловать, тренер ${appData.trainer_profile.full_name}!`);
       } else {
         showToast('Неверный мастер-код тренера. По умолчанию: COACH2026', 'error');
       }
     }
 
-    function submitStudentCode() {
+    async function submitStudentCode() {
       const input = document.getElementById('input-student-code');
       const val = (input ? input.value : '').trim().toUpperCase();
       const found = (appData.students || []).find(s => s.access_code.toUpperCase() === val);
@@ -1166,9 +1350,14 @@ async function bookSession(date, time) {
         appData.current_role = 'student';
         appData.current_student_id = found.id;
         uiState.onboardingMode = null;
+        try {
+          localStorage.setItem('sv_role', 'student');
+        } catch (e) {}
         saveAppData();
-        showToast(`Привет, ${found.full_name}! С возвращением в Step Value.`);
         renderApp();
+        await getOrCreateSupabaseUser('student', { autoEnter: true, student: found });
+        const activeSt = getCurrentStudent() || found;
+        showToast(`Привет, ${activeSt.full_name}! С возвращением в Step Value.`);
       } else {
         showToast('Код подопечного не найден. Проверьте код (например, STEP-101)', 'error');
       }
@@ -1198,15 +1387,15 @@ async function bookSession(date, time) {
           </div>
 
           <div class="grid grid-cols-2 gap-3.5 mb-5">
-        <button onclick="authenticateUser('student'); selectOnboardingMode('student_pin');" class="group p-5 rounded-2xl bg-[#161B22] border border-[#30363D] hover:border-[#10B981] transition-all flex flex-col items-center justify-center text-center">
-          <div class="w-12 h-12 rounded-2xl bg-[#0D1117] border border-[#30363D] group-hover:border-[#10B981] flex items-center justify-center mb-3 transition-all">
+        <button onclick="selectOnboardingMode('student_pin')" class="group p-5 rounded-2xl bg-[#161B22] border ${uiState.onboardingMode === 'student_pin' ? 'border-[#00E676] shadow-neon' : 'border-[#30363D] hover:border-[#10B981]'} transition-all flex flex-col items-center justify-center text-center">
+          <div class="w-12 h-12 rounded-2xl bg-[#0D1117] border ${uiState.onboardingMode === 'student_pin' ? 'border-[#00E676]' : 'border-[#30363D] group-hover:border-[#10B981]'} flex items-center justify-center mb-3 transition-all">
             <i data-lucide="dumbbell" class="w-6 h-6 text-[#10B981]"></i>
           </div>
           <div class="text-sm font-bold text-white tracking-wide">Я Ученик</div>
         </button>
 
-        <button onclick="authenticateUser('coach'); selectOnboardingMode('trainer_pin');" class="group p-5 rounded-2xl bg-[#161B22] border border-[#30363D] hover:border-[#10B981] transition-all flex flex-col items-center justify-center text-center">
-          <div class="w-12 h-12 rounded-2xl bg-[#0D1117] border border-[#30363D] group-hover:border-[#10B981] flex items-center justify-center mb-3 transition-all">
+        <button onclick="selectOnboardingMode('trainer_pin')" class="group p-5 rounded-2xl bg-[#161B22] border ${uiState.onboardingMode === 'trainer_pin' ? 'border-[#00E676] shadow-neon' : 'border-[#30363D] hover:border-[#10B981]'} transition-all flex flex-col items-center justify-center text-center">
+          <div class="w-12 h-12 rounded-2xl bg-[#0D1117] border ${uiState.onboardingMode === 'trainer_pin' ? 'border-[#00E676]' : 'border-[#30363D] group-hover:border-[#10B981]'} flex items-center justify-center mb-3 transition-all">
             <i data-lucide="shield-check" class="w-6 h-6 text-[#10B981]"></i>
           </div>
           <div class="text-sm font-bold text-white tracking-wide">Я Тренер</div>
@@ -1340,10 +1529,12 @@ async function bookSession(date, time) {
       }
     }
 
+    let isBookingInProgress = false;
+
     async function bookStudentSlot(isoDate, startTime) {
-  const success = await bookSession(isoDate, startTime);
-if (!success) return;
-  const student = getCurrentStudent();
+      if (isBookingInProgress) return;
+
+      const student = getCurrentStudent();
       if (!student) return;
       if (!Array.isArray(student.active_bookings)) student.active_bookings = [];
 
@@ -1352,52 +1543,83 @@ if (!success) return;
         return;
       }
 
+      const daySlots = appData.schedule_slots[isoDate] || [];
+      const startIndex = daySlots.findIndex(s => s.time === startTime);
+      if (startIndex === -1) {
+        showToast('Выбранный слот не найден в расписании.', 'error');
+        return;
+      }
+
       const reschedulingId = uiState.reschedulingBookingId;
       const existingToReschedule = reschedulingId
         ? student.active_bookings.find(b => b.id === reschedulingId)
         : null;
 
-      if (!existingToReschedule) {
-        if (student.subscription.remaining <= 0) {
-          showToast('На балансе 0 тренировок. Обновите абонемент для записи.', 'error');
+      isBookingInProgress = true;
+      try {
+        // Синхронное бронирование в Supabase (проверка остатка, запись в bookings,used_sessions + 1)
+        const result = await bookSession(isoDate, startTime);
+        if (!result || !result.success) {
+          // Если база выдала ошибку или остаток 0 — прерываем операцию и не меняем локальный UI
           return;
         }
-        if (student.active_bookings.length >= student.subscription.remaining) {
-          showToast(`Лимит активных записей исчерпан (${student.subscription.remaining} по балансу абонемента).`, 'error');
-          return;
+
+        const activeStudent = getCurrentStudent() || student;
+        if (!Array.isArray(activeStudent.active_bookings)) activeStudent.active_bookings = [];
+
+        // Если это был перенос существующей записи — освобождаем старый слот
+        if (existingToReschedule) {
+          releaseBookingEntryFromSchedule(activeStudent, existingToReschedule);
+          activeStudent.active_bookings = activeStudent.active_bookings.filter(b => b.id !== reschedulingId);
         }
-      } else {
-        releaseBookingEntryFromSchedule(student, existingToReschedule);
-        student.active_bookings = student.active_bookings.filter(b => b.id !== reschedulingId);
-      }
 
-      const hoursNeeded = Math.ceil((student.session_duration || 60) / 60);
-      const daySlots = appData.schedule_slots[isoDate] || [];
-      const startIndex = daySlots.findIndex(s => s.time === startTime);
-      if (startIndex === -1) return;
+        // Обновляем локальное состояние абонемента строго по ответу Supabase
+        const sub = result.sub;
+        const total = Number(sub.total_sessions) || activeStudent.subscription.total || 12;
+        const used = Number(sub.used_sessions) || 0;
+        const remaining = Math.max(0, total - used);
+        const sessionDuration = Number(sub.session_duration_minutes) || activeStudent.session_duration || 120;
 
-      for (let k = 0; k < hoursNeeded; k++) {
-        if (daySlots[startIndex + k]) {
-          daySlots[startIndex + k].booked_by = student.id;
+        activeStudent.session_duration = sessionDuration;
+        activeStudent.subscription.id = sub.id;
+        activeStudent.subscription.total = total;
+        activeStudent.subscription.used = used;
+        activeStudent.subscription.remaining = remaining;
+        if (sub.billing_day) {
+          activeStudent.subscription.payment_day = Number(sub.billing_day);
         }
+
+        // Помечаем часы в локальной сетке расписания как занятые реальным UUID ученика
+        const hoursNeeded = Math.ceil(sessionDuration / 60);
+        const targetDaySlots = appData.schedule_slots[isoDate] || [];
+        const targetStartIndex = targetDaySlots.findIndex(s => s.time === startTime);
+        if (targetStartIndex !== -1) {
+          for (let k = 0; k < hoursNeeded; k++) {
+            if (targetDaySlots[targetStartIndex + k]) {
+              targetDaySlots[targetStartIndex + k].booked_by = activeStudent.id;
+            }
+          }
+        }
+
+        activeStudent.active_bookings.push({
+          id: (result.booking && result.booking.id) ? result.booking.id : ('bk-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5)),
+          date: isoDate,
+          time: startTime,
+          duration: sessionDuration
+        });
+
+        activeStudent.active_bookings.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+        uiState.reschedulingBookingId = null;
+
+        saveAppData();
+        triggerHaptic('success');
+        showToast(existingToReschedule
+          ? `Запись перенесена на ${formatHumanDate(isoDate)} в ${startTime}. Остаток: ${remaining} из ${total}`
+          : `Тренировка забронирована на ${formatHumanDate(isoDate)} в ${startTime}! Остаток: ${remaining} из ${total}`);
+        renderApp();
+      } finally {
+        isBookingInProgress = false;
       }
-
-      student.active_bookings.push({
-        id: 'bk-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5),
-        date: isoDate,
-        time: startTime,
-        duration: student.session_duration || 60
-      });
-
-      student.active_bookings.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
-      uiState.reschedulingBookingId = null;
-
-      saveAppData();
-      triggerHaptic('success');
-      showToast(existingToReschedule
-        ? `Запись перенесена на ${formatHumanDate(isoDate)} в ${startTime}`
-        : `Запись добавлена: ${formatHumanDate(isoDate)} в ${startTime}`);
-      renderApp();
     }
 
     function cancelStudentBookingById(bookingId) {
@@ -4398,11 +4620,23 @@ if (!success) return;
       initReportChartsIfNeeded();
     }
 
-    window.addEventListener('DOMContentLoaded', () => {
+    window.addEventListener('DOMContentLoaded', async () => {
       initTelegramSDK();
       initTapToDismissKeyboard();
       loadAppData();
-      renderApp();
+
+      // Если пользователь уже вошел в кабинет (выбрал роль и код), синхронизируем его профиль с Supabase
+      if (appData.current_role) {
+        const activeStudent = appData.current_role === 'student' ? getCurrentStudent() : null;
+        renderApp();
+        await getOrCreateSupabaseUser(
+          appData.current_role === 'trainer' ? 'coach' : 'student',
+          { autoEnter: true, student: activeStudent }
+        );
+      } else {
+        // Иначе показываем экран выбора роли и логина (STEP-101, STEP-102, STEP-103 или COACH2026)
+        renderApp();
+      }
     });
   </script>
 </body>
