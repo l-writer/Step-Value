@@ -139,6 +139,154 @@
       }
     }
 
+
+    async function syncAllStudentsFromSupabase() {
+      if (!supabaseClient) return;
+      try {
+        const { data: users, error: uErr } = await supabaseClient
+          .from('users')
+          .select('*')
+          .eq('role', 'student');
+
+        if (uErr || !Array.isArray(users) || users.length === 0) return;
+
+        const { data: subs } = await supabaseClient
+          .from('subscriptions')
+          .select('*')
+          .eq('status', 'active');
+
+        const { data: bks } = await supabaseClient
+          .from('bookings')
+          .select('*')
+          .eq('status', 'confirmed');
+
+        const subsMap = new Map();
+        if (Array.isArray(subs)) {
+          subs.forEach(s => subsMap.set(s.student_id, s));
+        }
+
+        const bksMap = new Map();
+        if (Array.isArray(bks)) {
+          bks.forEach(b => {
+            if (!bksMap.has(b.student_id)) bksMap.set(b.student_id, []);
+            bksMap.get(b.student_id).push(b);
+          });
+        }
+
+        users.forEach(u => {
+          let st = (appData.students || []).find(s => 
+            s.id === u.id || 
+            s.supabase_id === u.id || 
+            (u.username && s.access_code && s.access_code.toUpperCase() === u.username.toUpperCase()) ||
+            (u.username && s.telegram_username && s.telegram_username.toLowerCase() === u.username.toLowerCase())
+          );
+
+          const userFullName = `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.username || 'Атлет';
+          const userSub = subsMap.get(u.id);
+          const userBks = bksMap.get(u.id) || [];
+
+          const total = Math.max(1, Number(userSub?.total_sessions) || (st?.subscription?.total) || 12);
+          const used = Math.min(total, Math.max(0, Number(userSub?.used_sessions) || 0));
+          const remaining = Math.max(0, total - used);
+          const dur = Number(userSub?.session_duration_minutes) || (st?.session_duration) || 120;
+          const billDay = Number(userSub?.billing_day) || (st?.subscription?.payment_day) || 5;
+
+          if (st) {
+            st.id = u.id;
+            st.supabase_id = u.id;
+            if (!st.full_name || st.full_name.startsWith('Новый')) {
+              st.full_name = userFullName;
+            }
+            st.session_duration = dur;
+            if (!st.subscription) st.subscription = {};
+            st.subscription.id = userSub?.id || st.subscription.id;
+            st.subscription.total = total;
+            st.subscription.total_sessions = total;
+            st.subscription.used = used;
+            st.subscription.used_sessions = used;
+            st.subscription.remaining = remaining;
+            st.subscription.payment_day = billDay;
+
+            if (userBks.length > 0) {
+              st.active_bookings = userBks.map(b => ({
+                id: b.id,
+                date: b.session_date,
+                time: b.session_time,
+                duration: Number(b.duration_minutes) || dur
+              }));
+            }
+          } else {
+            const parts = userFullName.split(' ');
+            const initials = ((parts[0] ? parts[0][0] : 'А') + (parts[1] ? parts[1][0] : 'В')).toUpperCase();
+            const code = (u.username && u.username.toUpperCase().startsWith('STEP-')) 
+              ? u.username.toUpperCase() 
+              : generateFreeStudentAccessCode();
+
+            const newSt = {
+              id: u.id,
+              supabase_id: u.id,
+              access_code: code,
+              telegram_username: u.username || '',
+              full_name: userFullName,
+              avatar: initials,
+              status: 'active',
+              freeze_details: { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
+              session_duration: dur,
+              subscription: {
+                id: userSub?.id,
+                total: total,
+                total_sessions: total,
+                used: used,
+                used_sessions: used,
+                remaining: remaining,
+                payment_day: billDay,
+                robokassa_sum: '24 000 ₽',
+                robokassa_url: 'https://auth.robokassa.ru/Merchant/Index.aspx?MerchantLogin=StepValueCoach&OutSum=24000'
+              },
+              payment_history: [
+                { date: formatDotDate(formatISO(getTodayDateObj())), count: total, amount: '24 000 ₽', status: 'Оплачено' }
+              ],
+              medical_notes: 'Ограничений пока не указано',
+              trainer_private_notes: '',
+              notification_settings: { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+              workouts: [],
+              anthropometry: [
+                { date: formatDotDate(formatISO(getTodayDateObj())), chest: 100, waist: 80, arms: 36 }
+              ],
+              checkups: [],
+              inbody: [
+                enrichInBodyRecord({ date: formatDotDate(formatISO(getTodayDateObj())), muscle_mass: 35.0, body_fat_pct: 16.0, water: 46.0, weight: 78.0 })
+              ],
+              photo_reports: [
+                {
+                  date: 'Октябрь 2026',
+                  front_url: createSilhouetteDataUri('Октябрь 2026', 'СПЕРЕДИ', 6, 2, '#00E676'),
+                  side_url: createSilhouetteDataUri('Октябрь 2026', 'СБОКУ', 6, 2, '#00E676'),
+                  back_url: createSilhouetteDataUri('Октябрь 2026', 'СЗАДИ', 6, 2, '#00E676'),
+                  front_custom: false,
+                  side_custom: false,
+                  back_custom: false
+                }
+              ],
+              active_bookings: userBks.map(b => ({
+                id: b.id,
+                date: b.session_date,
+                time: b.session_time,
+                duration: Number(b.duration_minutes) || dur
+              }))
+            };
+
+            appData.students.push(newSt);
+          }
+        });
+
+        saveAppData();
+        renderApp();
+      } catch (err) {
+        console.warn('Ошибка синхронизации студентов из Supabase:', err);
+      }
+    }
+
     async function getOrCreateSupabaseUser(role = 'student', options = {}) {
   const normalizedDbRole = (role === 'trainer' || role === 'coach') ? 'coach' : 'student';
   const preferredStudent = options.student || null;
@@ -515,7 +663,7 @@
       document.addEventListener('pointerdown', (e) => {
         const active = document.activeElement;
         if (active && isTextControl(active)) {
-          if (!active.contains(e.target) && !isTextControl(e.target)) {
+          if (!active.contains(e.target) && !isTextControl(e.target) && !e.target.closest('#modal-backdrop')) {
             active.blur();
           }
         }
@@ -1454,6 +1602,7 @@
       uiState.studentTab = tabName;
       uiState.workoutEditorOpen = false;
       uiState.studentReportSubscreen = null;
+      uiState.reschedulingBookingId = null;
       renderApp();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -1557,21 +1706,89 @@
 
       isBookingInProgress = true;
       try {
-        // Синхронное бронирование в Supabase (проверка остатка, запись в bookings,used_sessions + 1)
+        if (existingToReschedule) {
+          // ==================== РЕЖИМ ПЕРЕНОСА (Баланс НЕ списывается!) ====================
+          const sessionDuration = existingToReschedule.duration || student.session_duration || 120;
+
+          // 1. Освобождаем старый слот в локальной сетке
+          releaseBookingEntryFromSchedule(student, existingToReschedule);
+
+          // 2. Занимаем новый слот в локальной сетке
+          const hoursNeeded = Math.ceil(sessionDuration / 60);
+          const targetDaySlots = appData.schedule_slots[isoDate] || [];
+          const targetStartIndex = targetDaySlots.findIndex(s => s.time === startTime);
+          if (targetStartIndex !== -1) {
+            for (let k = 0; k < hoursNeeded; k++) {
+              if (targetDaySlots[targetStartIndex + k]) {
+                targetDaySlots[targetStartIndex + k].booked_by = student.id;
+              }
+            }
+          }
+
+          // 3. Обновляем саму запись в массиве активных броней
+          existingToReschedule.date = isoDate;
+          existingToReschedule.time = startTime;
+          existingToReschedule.duration = sessionDuration;
+
+          student.active_bookings.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+          uiState.reschedulingBookingId = null;
+
+          // 4. Синхронизируем изменение в Supabase (БЕЗ списания used_sessions!)
+          try {
+            if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+              const userRaw = localStorage.getItem('sv_user');
+              const user = userRaw ? JSON.parse(userRaw) : currentUser;
+
+              if (existingToReschedule.id && !String(existingToReschedule.id).startsWith('bk-')) {
+                await supabaseClient
+                  .from('bookings')
+                  .update({
+                    session_date: isoDate,
+                    session_time: startTime,
+                    duration_minutes: sessionDuration,
+                    status: 'confirmed'
+                  })
+                  .eq('id', existingToReschedule.id);
+              } else if (user && user.id) {
+                const { data: newBk } = await supabaseClient
+                  .from('bookings')
+                  .insert([{
+                    student_id: user.id,
+                    session_date: isoDate,
+                    session_time: startTime,
+                    duration_minutes: sessionDuration,
+                    status: 'confirmed'
+                  }])
+                  .select();
+                if (newBk && newBk.length > 0) {
+                  existingToReschedule.id = newBk[0].id;
+                }
+              }
+            }
+          } catch (err) {
+            console.warn('Ошибка синхронизации переноса с Supabase:', err);
+          }
+
+          saveAppData();
+          triggerHaptic('success');
+          showToast(`Запись перенесена на ${formatHumanDate(isoDate)} в ${startTime}. Баланс сохранён: ${student.subscription.remaining} из ${student.subscription.total}!`);
+          renderApp();
+          return;
+        }
+
+        // ==================== НОВОЕ БРОНИРОВАНИЕ (Списание занятия) ====================
+        if (student.subscription && student.subscription.remaining <= 0) {
+          showToast('Закончились тренировки в абонементе! Обновите абонемент для записи.', 'error');
+          return;
+        }
+
         const result = await bookSession(isoDate, startTime);
         if (!result || !result.success) {
-          // Если база выдала ошибку или остаток 0 — прерываем операцию и не меняем локальный UI
           return;
         }
 
         const activeStudent = getCurrentStudent() || student;
         if (!Array.isArray(activeStudent.active_bookings)) activeStudent.active_bookings = [];
-
-        // Если это был перенос существующей записи — освобождаем старый слот
-        if (existingToReschedule) {
-          releaseBookingEntryFromSchedule(activeStudent, existingToReschedule);
-          activeStudent.active_bookings = activeStudent.active_bookings.filter(b => b.id !== reschedulingId);
-        }
 
         // Обновляем локальное состояние абонемента строго по ответу Supabase
         const sub = result.sub;
@@ -1589,7 +1806,7 @@
           activeStudent.subscription.payment_day = Number(sub.billing_day);
         }
 
-        // Помечаем часы в локальной сетке расписания как занятые реальным UUID ученика
+        // Помечаем часы в локальной сетке расписания
         const hoursNeeded = Math.ceil(sessionDuration / 60);
         const targetDaySlots = appData.schedule_slots[isoDate] || [];
         const targetStartIndex = targetDaySlots.findIndex(s => s.time === startTime);
@@ -1609,13 +1826,10 @@
         });
 
         activeStudent.active_bookings.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
-        uiState.reschedulingBookingId = null;
 
         saveAppData();
         triggerHaptic('success');
-        showToast(existingToReschedule
-          ? `Запись перенесена на ${formatHumanDate(isoDate)} в ${startTime}. Остаток: ${remaining} из ${total}`
-          : `Тренировка забронирована на ${formatHumanDate(isoDate)} в ${startTime}! Остаток: ${remaining} из ${total}`);
+        showToast(`Тренировка забронирована на ${formatHumanDate(isoDate)} в ${startTime}! Остаток: ${remaining} из ${total}`);
         renderApp();
       } finally {
         isBookingInProgress = false;
@@ -3561,9 +3775,12 @@
 
     function handleNewStudentCodeInput(inputEl) {
       if (!inputEl) return;
-      const cleaned = inputEl.value.toUpperCase().replace(/[^A-Z0-9_-]/g, '');
-      if (inputEl.value !== cleaned) {
+      const start = inputEl.selectionStart;
+      const oldVal = inputEl.value;
+      const cleaned = oldVal.toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+      if (oldVal !== cleaned) {
         inputEl.value = cleaned;
+        try { inputEl.setSelectionRange(start, start); } catch (e) {}
       }
       const errEl = document.getElementById('new-st-code-error');
       const isTaken = (appData.students || []).some(s => (s.access_code || '').toUpperCase() === cleaned && cleaned !== '');
@@ -3658,7 +3875,7 @@
       showToast(`Скопировано в буфер: «${inviteMsg}»`);
     }
 
-    function createNewStudentRecord() {
+    async function createNewStudentRecord() {
       const nameEl = document.getElementById('new-st-name');
       const userEl = document.getElementById('new-st-username');
       const packEl = document.getElementById('new-st-pack');
@@ -3683,14 +3900,53 @@
 
       const fio = (nameEl ? nameEl.value.trim() : '') || 'Новый Подопечный';
       const cleanUser = (userEl ? userEl.value.trim() : '').replace(/^@/, '');
-      const pack = parseInt(packEl ? packEl.value : 12, 10) || 12;
+      const pack = Math.max(1, parseInt(packEl ? packEl.value : 12, 10) || 12);
       const dur = parseInt(durEl ? durEl.value : 120, 10) || 120;
       const parts = fio.split(' ');
-      const initials = ((parts[0] ? parts[0][0] : 'С') + (parts[1] ? parts[1][0] : 'В')).toUpperCase();
-      const newId = 'step-' + Date.now();
+      const initials = ((parts[0] ? parts[0][0] : 'А') + (parts[1] ? parts[1][0] : 'В')).toUpperCase();
+      let assignedId = 'step-' + Date.now();
+      let createdSubId = null;
+
+      // 1. Создаем пользователя в облаке Supabase (если клиент доступен)
+      if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+        try {
+          const { data: newUser, error: userErr } = await supabaseClient
+            .from('users')
+            .insert([{
+              telegram_id: Date.now(),
+              first_name: parts[0] || fio,
+              last_name: parts.slice(1).join(' ') || '',
+              username: cleanUser || customCode.toLowerCase(),
+              role: 'student'
+            }])
+            .select()
+            .single();
+
+          if (newUser && newUser.id) {
+            assignedId = newUser.id;
+            const { data: newSub } = await supabaseClient
+              .from('subscriptions')
+              .insert([{
+                student_id: newUser.id,
+                total_sessions: pack,
+                used_sessions: 0,
+                session_duration_minutes: dur,
+                billing_day: 5,
+                status: 'active'
+              }])
+              .select()
+              .single();
+
+            if (newSub) createdSubId = newSub.id;
+          }
+        } catch (err) {
+          console.warn('Ошибка сохранения нового ученика в Supabase:', err);
+        }
+      }
 
       const newStudent = {
-        id: newId,
+        id: assignedId,
+        supabase_id: assignedId,
         access_code: customCode,
         telegram_username: cleanUser,
         full_name: fio,
@@ -3699,7 +3955,11 @@
         freeze_details: { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
         session_duration: dur,
         subscription: {
+          id: createdSubId,
           total: pack,
+          total_sessions: pack,
+          used: 0,
+          used_sessions: 0,
           remaining: pack,
           payment_day: 5,
           robokassa_sum: '24 000 ₽',
@@ -3737,6 +3997,7 @@
       saveAppData();
       copyInviteCode(customCode);
       closeModal();
+      showToast(`Подопечный ${fio} создан и сохранён в облаке!`);
       renderApp();
     }
 
@@ -3835,20 +4096,57 @@
 
     function adjustStudentRemainingBalance(studentId, delta) {
       const st = getStudentById(studentId);
-      if (!st) return;
-      st.subscription.remaining = Math.max(0, st.subscription.remaining + delta);
+      if (!st || !st.subscription) return;
+      const total = Math.max(1, Number(st.subscription.total_sessions || st.subscription.total) || 12);
+      let currentUsed = Math.min(total, Math.max(0, Number(st.subscription.used_sessions ?? st.subscription.used) || 0));
+      // delta > 0 (+1 к остатку) означает уменьшение used
+      // delta < 0 (-1 от остатка) означает увеличение used
+      currentUsed = Math.max(0, Math.min(total, currentUsed - delta));
+      const remaining = Math.max(0, total - currentUsed);
+
+      st.subscription.total = total;
+      st.subscription.total_sessions = total;
+      st.subscription.used = currentUsed;
+      st.subscription.used_sessions = currentUsed;
+      st.subscription.remaining = remaining;
+
+      if (typeof supabaseClient !== 'undefined' && supabaseClient && st.subscription.id) {
+        supabaseClient
+          .from('subscriptions')
+          .update({ used_sessions: currentUsed })
+          .eq('id', st.subscription.id)
+          .then();
+      }
+
       saveAppData();
       triggerHaptic('light');
-      showToast(`Баланс тренировок: осталось ${st.subscription.remaining} из ${st.subscription.total}`);
+      showToast(`Баланс: осталось ${remaining} из ${total}`);
       renderApp();
     }
 
     function updateStudentTotalSubscription(studentId, totalVal) {
       const st = getStudentById(studentId);
-      if (!st) return;
-      st.subscription.total = Math.max(1, parseInt(totalVal, 10) || 12);
+      if (!st || !st.subscription) return;
+      const newTotal = Math.max(1, parseInt(totalVal, 10) || 12);
+      let currentUsed = Math.min(newTotal, Math.max(0, Number(st.subscription.used_sessions ?? st.subscription.used) || 0));
+      const remaining = Math.max(0, newTotal - currentUsed);
+
+      st.subscription.total = newTotal;
+      st.subscription.total_sessions = newTotal;
+      st.subscription.used = currentUsed;
+      st.subscription.used_sessions = currentUsed;
+      st.subscription.remaining = remaining;
+
+      if (typeof supabaseClient !== 'undefined' && supabaseClient && st.subscription.id) {
+        supabaseClient
+          .from('subscriptions')
+          .update({ total_sessions: newTotal, used_sessions: currentUsed })
+          .eq('id', st.subscription.id)
+          .then();
+      }
+
       saveAppData();
-      showToast(`Пакет абонемента обновлён: ${st.subscription.total} занятий`);
+      showToast(`Пакет обновлён: ${remaining} из ${newTotal} занятий`);
       renderApp();
     }
 
@@ -4682,17 +4980,17 @@
       initTapToDismissKeyboard();
       loadAppData();
 
-      // Если пользователь уже вошел в кабинет (выбрал роль и код), синхронизируем его профиль с Supabase
+      renderApp();
+
+      // Фоновая облачная синхронизация единого списка подопечных и их балансов
+      syncAllStudentsFromSupabase();
+
       if (appData.current_role) {
         const activeStudent = appData.current_role === 'student' ? getCurrentStudent() : null;
-        renderApp();
         await getOrCreateSupabaseUser(
           appData.current_role === 'trainer' ? 'coach' : 'student',
           { autoEnter: true, student: activeStudent }
         );
-      } else {
-        // Иначе показываем экран выбора роли и логина (STEP-101, STEP-102, STEP-103 или COACH2026)
-        renderApp();
       }
     });
   </script>
