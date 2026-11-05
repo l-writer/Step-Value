@@ -94,6 +94,65 @@
     console.error("Ошибка авторизации Supabase:", err);
   }
 }
+
+async function bookSession(date, time) {
+  try {
+    const rawUser = localStorage.getItem('sv_user');
+    if (!rawUser) {
+      alert("Сначала авторизуйтесь!");
+      return;
+    }
+    const user = JSON.parse(rawUser);
+
+    // 1. Проверяем остаток абонемента
+    const { data: sub, error: subError } = await supabaseClient
+      .from('subscriptions')
+      .select('*')
+      .eq('student_id', user.id)
+      .eq('status', 'active')
+      .maybeSingle();
+
+    if (subError) throw subError;
+
+    if (!sub || (sub.total_sessions - sub.used_sessions) <= 0) {
+      alert("Закончились тренировки в абонементе!");
+      return;
+    }
+
+    // 2. Создаем запись в таблице bookings
+    const { error: bookError } = await supabaseClient
+      .from('bookings')
+      .insert([{
+        student_id: user.id,
+        session_date: date,
+        session_time: time,
+        duration_minutes: sub.session_duration_minutes || 120,
+        status: 'confirmed'
+      }]);
+
+    if (bookError) throw bookError;
+
+    // 3. Списываем одно занятие в subscriptions
+    const { error: updateError } = await supabaseClient
+      .from('subscriptions')
+      .update({ used_sessions: sub.used_sessions + 1 })
+      .eq('id', sub.id);
+
+    if (updateError) throw updateError;
+
+    alert(`Тренировка забронирована на ${time}! Баланс списан.`);
+
+    // Перерисовываем интерфейс, если доступно
+    if (typeof renderApp === 'function') {
+      renderApp();
+    } else {
+      location.reload();
+    }
+  } catch (err) {
+    console.error("Ошибка бронирования:", err);
+    alert("Не удалось забронировать тренировку.");
+  }
+}
   </script>
 
   <script>
