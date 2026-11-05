@@ -23,56 +23,77 @@
 
     let currentUser = null;
 
-    async function authenticateUser(role = 'student') {
-      const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
+    async function authenticateUser(role) {
+  try {
+    // 1. Проверяем данные из Telegram WebApp, если запущено в Telegram
+    const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
+    const telegramId = tgUser?.id ? String(tgUser.id) : "999999999";
+    const userName = tgUser?.first_name 
+      ? (tgUser.first_name + (tgUser.last_name ? ' ' + tgUser.last_name : '')) 
+      : (role === 'coach' ? "Демо Тренер" : "Демо Ученик");
 
-      const userData = {
-        telegram_id: tgUser ? tgUser.id : 999999999,
-        first_name: tgUser ? tgUser.first_name : 'Александр',
-        last_name: tgUser ? (tgUser.last_name || '') : 'Воронов',
-        username: tgUser ? (tgUser.username || '') : 'demo_user',
-        role: role
-      };
+    console.log("Запрос авторизации для:", { telegramId, userName, role });
 
-      try {
-        let { data: existingUser, error: fetchError } = await supabaseClient
-          .from('users')
-          .select('*')
-          .eq('telegram_id', userData.telegram_id)
-          .maybeSingle();
+    // 2. Ищем или создаем пользователя в Supabase
+    let { data: user, error } = await supabaseClient
+      .from('users')
+      .select('*')
+      .eq('telegram_id', telegramId)
+      .maybeSingle();
 
-        if (fetchError) throw fetchError;
+    if (error) throw error;
 
-        if (!existingUser) {
-          const { data: newUser, error: insertError } = await supabaseClient
-            .from('users')
-            .insert([userData])
-            .select()
-            .single();
+    if (!user) {
+      const { data: newUser, error: createError } = await supabaseClient
+        .from('users')
+        .insert([{
+          telegram_id: telegramId,
+          name: userName,
+          role: role
+        }])
+        .select()
+        .single();
 
-          if (insertError) throw insertError;
-          existingUser = newUser;
+      if (createError) throw createError;
+      user = newUser;
 
-          if (role === 'student') {
-            await supabaseClient.from('subscriptions').insert([{
-              student_id: existingUser.id,
-              total_sessions: 12,
-              used_sessions: 0,
-              session_duration_minutes: 120,
-              billing_day: 7,
-              status: 'active'
-            }]);
-          }
-        }
-
-        currentUser = existingUser;
-        console.log('👤 Авторизован пользователь:', currentUser);
-        return currentUser;
-      } catch (err) {
-        console.error('Ошибка синхронизации пользователя:', err.message);
-        return null;
+      // Если это ученик, сразу создаем базовый абонемент
+      if (role === 'student') {
+        await supabaseClient.from('subscriptions').insert([{
+          user_id: user.id,
+          total_sessions: 10,
+          sessions_left: 10,
+          is_active: true
+        }]);
       }
     }
+
+    console.log("👤 Авторизован пользователь:", user);
+
+    // 3. Сохраняем сессию локально
+    localStorage.setItem('sv_user', JSON.stringify(user));
+    localStorage.setItem('sv_role', role);
+
+    // 4. Переключаем экран интерфейса
+    if (typeof state !== 'undefined') {
+      state.currentRole = role;
+      state.isOnboarded = true;
+    }
+    if (typeof uiState !== 'undefined') {
+      uiState.isOnboarded = true;
+    }
+
+    // Вызываем перерисовку приложения (если используется renderApp)
+    if (typeof renderApp === 'function') {
+      renderApp();
+    } else {
+      location.reload();
+    }
+
+  } catch (err) {
+    console.error("Ошибка авторизации Supabase:", err);
+  }
+}
   </script>
 
   <script>
