@@ -4170,6 +4170,84 @@
       return digits ? parseInt(digits, 10) : 0;
     }
 
+
+    function confirmDeleteStudentPrompt(studentId) {
+      triggerHaptic('warning');
+      const st = getStudentById(studentId);
+      if (!st) return;
+
+      openModal(`
+        <div class="space-y-4">
+          <div class="flex items-center justify-between">
+            <h3 class="text-base font-bold text-red-400 flex items-center gap-2">
+              <i data-lucide="trash-2" class="w-5 h-5 text-red-400"></i>
+              Удалить ученика
+            </h3>
+            <button onclick="closeModal()" class="text-[#8B949E] hover:text-white p-1">
+              <i data-lucide="x" class="w-5 h-5"></i>
+            </button>
+          </div>
+          <p class="text-xs text-[#8B949E] leading-relaxed">
+            Вы уверены, что хотите удалить <strong class="text-white">${st.full_name}</strong>? Все данные ученика (тренировки, замеры, абонемент и записи) <strong class="text-red-400">сотрутся безвозвратно</strong>.
+          </p>
+          <div class="flex gap-2 pt-1">
+            <button onclick="closeModal()" class="flex-1 py-2.5 rounded-xl bg-[#0D1117] border border-[#30363D] text-xs font-semibold text-white hover:bg-[#161B22] transition">Отмена</button>
+            <button onclick="executeDeleteStudent('${st.id}')" class="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 active:scale-95 text-white text-xs font-bold transition">Удалить</button>
+          </div>
+        </div>
+      `);
+    }
+
+    async function executeDeleteStudent(studentId) {
+      const st = getStudentById(studentId);
+      if (!st) {
+        closeModal();
+        return;
+      }
+      const stName = st.full_name;
+      const targetDbId = st.supabase_id || st.id;
+
+      // 1. Освобождаем слоты в расписании тренера
+      if (appData.schedule_slots) {
+        Object.keys(appData.schedule_slots).forEach(dateKey => {
+          (appData.schedule_slots[dateKey] || []).forEach(slot => {
+            if (slot.booked_by === studentId || slot.booked_by === st.id || slot.booked_by === targetDbId) {
+              slot.booked_by = null;
+              slot.is_open = true;
+            }
+          });
+        });
+      }
+
+      // 2. Удаляем из локального массива учеников
+      appData.students = (appData.students || []).filter(s => s.id !== studentId && s.id !== st.id && s.id !== targetDbId);
+
+      // Если удалили текущего выбранного студента, переключаем на первого доступного
+      if (appData.current_student_id === studentId || appData.current_student_id === targetDbId) {
+        appData.current_student_id = appData.students[0] ? appData.students[0].id : null;
+      }
+
+      uiState.selectedTrainerStudentId = null;
+      uiState.trainerStudentSubscreen = null;
+
+      // 3. Синхронизируем удаление с Supabase
+      if (typeof supabaseClient !== 'undefined' && supabaseClient && targetDbId && !String(targetDbId).startsWith('step-')) {
+        try {
+          await supabaseClient.from('bookings').delete().eq('student_id', targetDbId);
+          await supabaseClient.from('subscriptions').delete().eq('student_id', targetDbId);
+          await supabaseClient.from('users').delete().eq('id', targetDbId);
+        } catch (err) {
+          console.warn('Ошибка удаления подопечного из Supabase:', err);
+        }
+      }
+
+      saveAppData();
+      closeModal();
+      triggerHaptic('warning');
+      showToast(`Подопечный «${stName}» успешно удалён!`);
+      renderApp();
+    }
+
     function saveTrainerManagementFinanceAndNotes(studentId) {
       const st = getStudentById(studentId);
       if (!st) return;
@@ -4764,6 +4842,13 @@
               <textarea id="tr-mgmt-private-notes" rows="3" placeholder="Цели, психология, особенности режима клиента..." class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl p-3 text-xs text-white outline-none resize-none">${st.trainer_private_notes || ''}</textarea>
               <button onclick="saveTrainerManagementFinanceAndNotes('${st.id}')" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider shadow-neon">
                 Сохранить параметры и заметку
+              </button>
+            </div>
+
+            <div class="pt-1">
+              <button type="button" onclick="confirmDeleteStudentPrompt('${st.id}')" class="w-full py-3 rounded-xl bg-red-950/30 hover:bg-red-900/50 active:scale-95 border border-red-500/40 hover:border-red-500 text-red-400 hover:text-red-300 font-bold text-xs uppercase tracking-wider transition flex items-center justify-center gap-2">
+                <i data-lucide="trash-2" class="w-4 h-4"></i>
+                <span>Удалить ученика</span>
               </button>
             </div>
           </div>
