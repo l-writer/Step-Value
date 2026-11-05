@@ -100,15 +100,19 @@
 
 async function bookSession(date, time) {
   try {
-    const rawUser = localStorage.getItem('sv_user');
+    let rawUser = localStorage.getItem('sv_user');
     if (!rawUser) {
-      alert("Сначала авторизуйтесь!");
-      return;
+      await authenticateUser('student');
+      rawUser = localStorage.getItem('sv_user');
+    }
+    if (!rawUser) {
+      alert("Не удалось войти. Перезагрузите страницу.");
+      return false;
     }
     const user = JSON.parse(rawUser);
 
-    // 1. Проверяем остаток абонемента
-    const { data: sub, error: subError } = await supabaseClient
+    // 1. Проверяем абонемент
+    let { data: sub, error: subError } = await supabaseClient
       .from('subscriptions')
       .select('*')
       .eq('student_id', user.id)
@@ -117,12 +121,29 @@ async function bookSession(date, time) {
 
     if (subError) throw subError;
 
-    if (!sub || (sub.total_sessions - sub.used_sessions) <= 0) {
-      alert("Закончились тренировки в абонементе!");
-      return;
+    if (!sub) {
+      const { data: newSub, error: insErr } = await supabaseClient
+        .from('subscriptions')
+        .insert([{
+          student_id: user.id,
+          total_sessions: 12,
+          used_sessions: 0,
+          session_duration_minutes: 120,
+          billing_day: 7,
+          status: 'active'
+        }])
+        .select()
+        .single();
+      if (insErr) throw insErr;
+      sub = newSub;
     }
 
-    // 2. Создаем запись в таблице bookings
+    if ((sub.total_sessions - sub.used_sessions) <= 0) {
+      alert("Закончились тренировки в абонементе!");
+      return false;
+    }
+
+    // 2. Добавляем запись в таблицу bookings
     const { error: bookError } = await supabaseClient
       .from('bookings')
       .insert([{
@@ -135,7 +156,7 @@ async function bookSession(date, time) {
 
     if (bookError) throw bookError;
 
-    // 3. Списываем одно занятие в subscriptions
+    // 3. Списываем одно занятие
     const { error: updateError } = await supabaseClient
       .from('subscriptions')
       .update({ used_sessions: sub.used_sessions + 1 })
@@ -144,16 +165,11 @@ async function bookSession(date, time) {
     if (updateError) throw updateError;
 
     alert(`Тренировка забронирована на ${time}! Баланс списан.`);
-
-    // Перерисовываем интерфейс, если доступно
-    if (typeof renderApp === 'function') {
-      renderApp();
-    } else {
-      location.reload();
-    }
+    return true;
   } catch (err) {
     console.error("Ошибка бронирования:", err);
-    alert("Не удалось забронировать тренировку.");
+    alert("Ошибка связи с базой данных.");
+    return false;
   }
 }
   </script>
@@ -1325,7 +1341,8 @@ async function bookSession(date, time) {
     }
 
     async function bookStudentSlot(isoDate, startTime) {
-  await bookSession(isoDate, startTime);
+  const success = await bookSession(isoDate, startTime);
+if (!success) return;
   const student = getCurrentStudent();
       if (!student) return;
       if (!Array.isArray(student.active_bookings)) student.active_bookings = [];
