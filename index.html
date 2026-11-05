@@ -1099,20 +1099,20 @@
           </div>
 
           <div class="grid grid-cols-2 gap-3.5 mb-5">
-            <button onclick="authenticateUser('student'); selectOnboardingMode('student_pin');" class="group p-5 ro
-              <div class="w-11 h-11 rounded-xl bg-[#0D1117] border border-[#30363D] group-hover:border-[#10B981] flex items-center justify-center text-[#00E676] transition">
-                <i data-lucide="dumbbell" class="w-6 h-6"></i>
-              </div>
-              <div class="text-base font-bold text-white">Я Ученик</div>
-            </button>
-
-            <button onclick="authenticateUser('coach'); selectOnboardingMode('trainer_pin');" class="group p-5 ro
-              <div class="w-11 h-11 rounded-xl bg-[#0D1117] border border-[#30363D] group-hover:border-[#10B981] flex items-center justify-center text-[#00E676] transition">
-                <i data-lucide="shield-check" class="w-6 h-6"></i>
-              </div>
-              <div class="text-base font-bold text-white">Я Тренер</div>
-            </button>
+        <button onclick="authenticateUser('student'); selectOnboardingMode('student_pin');" class="group p-5 rounded-2xl bg-[#161B22] border border-[#30363D] hover:border-[#10B981] transition-all text-left flex flex-col items-start">
+          <div class="w-11 h-11 rounded-xl bg-[#0D1117] border border-[#30363D] group-hover:border-[#10B981] flex items-center justify-center mb-4 transition-all">
+            <i data-lucide="dumbbell" class="w-6 h-6 text-[#10B981]"></i>
           </div>
+          <div class="text-base font-bold text-white">Я Ученик</div>
+        </button>
+
+        <button onclick="authenticateUser('coach'); selectOnboardingMode('trainer_pin');" class="group p-5 rounded-2xl bg-[#161B22] border border-[#30363D] hover:border-[#10B981] transition-all text-left flex flex-col items-start">
+          <div class="w-11 h-11 rounded-xl bg-[#0D1117] border border-[#30363D] group-hover:border-[#10B981] flex items-center justify-center mb-4 transition-all">
+            <i data-lucide="shield-check" class="w-6 h-6 text-[#10B981]"></i>
+          </div>
+          <div class="text-base font-bold text-white">Я Тренер</div>
+        </button>
+      </div>
 
           ${uiState.onboardingMode === 'student_pin' ? `
             <div class="bg-[#161B22] border border-[#10B981]/60 rounded-2xl p-4 shadow-neon space-y-3 animate-fade">
