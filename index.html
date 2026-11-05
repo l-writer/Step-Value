@@ -58,12 +58,15 @@
       user = newUser;
 
       // Если это ученик, сразу создаем базовый абонемент
+      // Если это ученик, сразу создаем базовый абонемент
       if (role === 'student') {
         await supabaseClient.from('subscriptions').insert([{
-          user_id: user.id,
-          total_sessions: 10,
-          sessions_left: 10,
-          is_active: true
+          student_id: user.id,
+          total_sessions: 12,
+          used_sessions: 0,
+          session_duration_minutes: 120,
+          billing_day: 7,
+          status: 'active'
         }]);
       }
     }
@@ -1321,8 +1324,9 @@ async function bookSession(date, time) {
       }
     }
 
-    function bookStudentSlot(isoDate, startTime) {
-      const student = getCurrentStudent();
+    async function bookStudentSlot(isoDate, startTime) {
+  await bookSession(isoDate, startTime);
+  const student = getCurrentStudent();
       if (!student) return;
       if (!Array.isArray(student.active_bookings)) student.active_bookings = [];
 
