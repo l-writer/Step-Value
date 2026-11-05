@@ -1622,21 +1622,64 @@
       }
     }
 
-    function cancelStudentBookingById(bookingId) {
-      const student = getCurrentStudent();
-      if (!student || !Array.isArray(student.active_bookings)) return;
-      const target = student.active_bookings.find(b => b.id === bookingId);
-      if (!target) return;
-      releaseBookingEntryFromSchedule(student, target);
-      student.active_bookings = student.active_bookings.filter(b => b.id !== bookingId);
-      if (uiState.reschedulingBookingId === bookingId) {
-        uiState.reschedulingBookingId = null;
+    async function cancelStudentBookingById(bookingId) {
+  const student = getCurrentStudent();
+  if (!student || !Array.isArray(student.active_bookings)) return;
+  const target = student.active_bookings.find(b => b.id === bookingId);
+  if (!target) return;
+
+  // 1. Возвращаем слот в локальное расписание тренера
+  releaseBookingEntryFromSchedule(student, target);
+  student.active_bookings = student.active_bookings.filter(b => b.id !== bookingId);
+  if (uiState.reschedulingBookingId === bookingId) {
+    uiState.reschedulingBookingId = null;
+  }
+
+  // 2. ВОЗВРАЩАЕМ ЗАНЯТИЕ НА БАЛАНС В UI
+  if (student.subscription) {
+    student.subscription.remaining = Math.min(
+      student.subscription.total,
+      (student.subscription.remaining || 0) + 1
+    );
+  }
+
+  // 3. Синхронизируем возврат с Supabase
+  try {
+    if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+      // Удаляем из таблицы bookings
+      await supabaseClient
+        .from('bookings')
+        .delete()
+        .eq('id', bookingId);
+
+      // Уменьшаем used_sessions в subscriptions
+      const userRaw = localStorage.getItem('sv_user');
+      if (userRaw) {
+        const user = JSON.parse(userRaw);
+        const { data: sub } = await supabaseClient
+          .from('subscriptions')
+          .select('*')
+          .eq('student_id', user.id)
+          .eq('status', 'active')
+          .maybeSingle();
+
+        if (sub && sub.used_sessions > 0) {
+          await supabaseClient
+            .from('subscriptions')
+            .update({ used_sessions: sub.used_sessions - 1 })
+            .eq('id', sub.id);
+        }
       }
-      saveAppData();
-      triggerHaptic('warning');
-      showToast('Тренировка отменена. Слот возвращён в расписание тренера.');
-      renderApp();
     }
+  } catch (err) {
+    console.warn("Ошибка синхронизации отмены с Supabase:", err);
+  }
+
+  saveAppData();
+  triggerHaptic('warning');
+  showToast('Тренировка отменена. Занятие возвращено на баланс!');
+  renderApp();
+}
 
     function startRescheduleStudentBooking(bookingId) {
       triggerHaptic('light');
