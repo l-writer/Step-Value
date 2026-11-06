@@ -892,9 +892,9 @@
         current_role: null,
         current_student_id: 'step-101',
         trainer_profile: {
-          master_pin: 'COACH2026',
-          full_name: 'Денис',
-          telegram_username: 'coach_denis'
+          master_pin: 'STEP878',
+          full_name: 'Степан',
+          telegram_username: 'winnie_v1'
         },
         students: [
           {
@@ -1467,24 +1467,30 @@
     }
 
     async function submitTrainerPin() {
-      const input = document.getElementById('input-trainer-pin');
-      const val = (input ? input.value : '').trim().toUpperCase();
-      const expected = (appData.trainer_profile.master_pin || 'COACH2026').toUpperCase();
-      if (val === expected) {
-        triggerHaptic('success');
-        appData.current_role = 'trainer';
-        uiState.onboardingMode = null;
-        try {
-          localStorage.setItem('sv_role', 'trainer');
-        } catch (e) {}
-        saveAppData();
-        renderApp();
-        await getOrCreateSupabaseUser('coach', { autoEnter: true });
-        showToast(`Добро пожаловать, тренер ${appData.trainer_profile.full_name}!`);
-      } else {
-        showToast('Неверный мастер-код тренера. По умолчанию: COACH2026', 'error');
-      }
-    }
+  const input = document.getElementById('input-trainer-pin');
+  const val = (input ? input.value : '').trim();
+  const expected = (appData.trainer_profile.master_pin || '').trim();
+
+  if (!val) {
+    showToast('Введите пароль тренера', 'error');
+    return;
+  }
+
+  if (val === expected) {
+    triggerHaptic('success');
+    appData.current_role = 'trainer';
+    uiState.onboardingMode = null;
+    try {
+      localStorage.setItem('sv_role', 'trainer');
+    } catch (e) {}
+    saveAppData();
+    renderApp();
+    await getOrCreateSupabaseUser('coach', { autoEnter: true });
+    showToast(`Добро пожаловать, тренер ${appData.trainer_profile.full_name}!`);
+  } else {
+    showToast('Неверный пароль тренера', 'error');
+  }
+}
 
     async function submitStudentCode() {
   const input = document.getElementById('input-student-code');
