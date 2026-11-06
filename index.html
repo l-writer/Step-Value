@@ -1490,35 +1490,54 @@
     }
 
     async function submitStudentCode() {
-      const input = document.getElementById('input-student-code');
-      const val = (input ? input.value : '').trim().toUpperCase();
-      const found = (appData.students || []).find(s => s.access_code.toUpperCase() === val);
-      if (found) {
-        triggerHaptic('success');
-        appData.current_role = 'student';
-        appData.current_student_id = found.id;
-        uiState.onboardingMode = null;
-        try {
-          localStorage.setItem('sv_role', 'student');
-        } catch (e) {}
-        saveAppData();
-        renderApp();
-        await getOrCreateSupabaseUser('student', { autoEnter: true, student: found });
-        const activeSt = getCurrentStudent() || found;
-        showToast(`Привет, ${activeSt.full_name}! С возвращением в Step Value.`);
-      } else {
-        showToast('Код подопечного не найден. Проверьте код (например, STEP-101)', 'error');
+  const input = document.getElementById('input-student-code');
+  const val = (input ? input.value : '').trim().toUpperCase();
+
+  if (!val) {
+    showToast('Введите персональный код доступа', 'error');
+    return;
+  }
+
+  let found = (appData.students || []).find(s => (s.access_code || s.code || '').toUpperCase() === val);
+
+  if (!found && typeof supabaseClient !== 'undefined' && supabaseClient) {
+    try {
+      const { data, error } = await supabaseClient
+        .from('students')
+        .select('*')
+        .or(`access_code.ilike.${val},code.ilike.${val},invite_code.ilike.${val}`)
+        .maybeSingle();
+
+      if (!error && data) {
+        found = data;
+        if (!appData.students) appData.students = [];
+        appData.students.push(found);
       }
+    } catch (err) {
+      console.warn('Ошибка запроса студента из Supabase:', err);
     }
+  }
 
-    function renderOnboardingScreen() {
-      const studentsChips = (appData.students || []).map(st => `
-        <button onclick="quickFillCode('input-student-code', '${st.access_code}')" class="px-2.5 py-1.5 rounded-lg bg-[#0D1117] hover:bg-[#1F242C] border border-[#30363D] text-[11px] text-[#8B949E] hover:text-white flex items-center gap-1.5 transition">
-          <span class="font-bold text-[#10B981]">${st.access_code}</span>
-          <span>• ${st.full_name.split(' ')[0]}</span>
-        </button>
-      `).join('');
+  if (found) {
+    triggerHaptic('success');
+    appData.current_role = 'student';
+    appData.current_student_id = found.id;
+    uiState.onboardingMode = null;
+    try {
+      localStorage.setItem('sv_role', 'student');
+      localStorage.setItem('sv_student_id', String(found.id));
+    } catch (e) {}
+    saveAppData();
+    renderApp();
+    await getOrCreateSupabaseUser('student', { autoEnter: true, student: found });
+    const activeSt = getCurrentStudent() || found;
+    showToast(`Привет, ${activeSt.full_name || activeSt.name}! С возвращением в Step Value.`);
+  } else {
+    showToast('Код подопечного не найден. Проверьте правильность кода.', 'error');
+  }
+}
 
+function renderOnboardingScreen() {
       return `
         <div class="min-h-[78vh] flex flex-col justify-center py-6 animate-fade">
           <div class="text-center mb-7">
@@ -1559,12 +1578,8 @@
                 </span>
                 <span class="text-[11px] text-[#8B949E]">Навсегда в памяти</span>
               </div>
-              <input id="input-student-code" type="text" value="STEP-101" placeholder="Например: STEP-101" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3.5 py-2.5 text-sm font-bold tracking-wider text-white uppercase outline-none" />
-              <div class="space-y-1.5">
-                <p class="text-[11px] text-[#8B949E]">Доступные демо-профили подопечных (тап для подстановки):</p>
-                <div class="flex flex-wrap gap-1.5">${studentsChips}</div>
-              </div>
-              <button onclick="submitStudentCode()" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider shadow-neon active:scale-[0.99] transition">
+              <input id="input-student-code" type="text" value="" placeholder="Введите код (например: STEP-101)" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3.5 py-2.5 text-sm font-bold tracking-wider text-white uppercase outline-none select-text" style="-webkit-user-select: text !important; user-select: text !important;" />
+              <button onclick="submitStudentCode()" class="mt-3 w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider shadow-neon active:scale-[0.99] transition">
                 Войти в кабинет атлета
               </button>
             </div>
