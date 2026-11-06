@@ -1247,7 +1247,7 @@ async function submitTrainerPin() {
     saveAppData();
     renderApp();
     await getOrCreateSupabaseUser('coach', { autoEnter: true });
-    showToast(`Добро пожаловать, тренер ${appData.trainer_profile.full_name}!`);
+    showToast(`Добро пожаловать, ${appData.trainer_profile.full_name}!`);
   } else {
     showToast('Неверный пароль тренера', 'error');
   }
@@ -4040,16 +4040,21 @@ function renderOnboardingScreen() {
       renderApp();
     }
 
-    function saveTrainerManagementFinanceAndNotes(studentId) {
-      const st = getStudentById(studentId);
+    async function saveTrainerManagementFinanceAndNotes(studentId) {
+      const st = (appData.students || []).find(s => String(s.id) === String(studentId));
       if (!st) return;
-      const tgEl = document.getElementById('tr-mgmt-tg-username');
-      const sumEl = document.getElementById('tr-mgmt-robokassa-sum');
-      const urlEl = document.getElementById('tr-mgmt-robokassa-url');
-      const notesEl = document.getElementById('tr-mgmt-private-notes');
+
+      const tgEl = document.getElementById('tm-tg-input');
+      const sumEl = document.getElementById('tm-sum-input');
+      const urlEl = document.getElementById('tm-url-input');
+      const notesEl = document.getElementById('tm-notes-input');
+
+      if (!st.subscription) st.subscription = {};
+
       if (tgEl) st.telegram_username = tgEl.value.trim().replace(/^@/, '');
-      const rawNum = sumEl ? Math.max(0, parseInt(sumEl.value, 10) || 0) : parseNumericRubles(st.subscription.robokassa_sum);
+      const rawNum = sumEl ? Math.max(0, parseInt(sumEl.value, 10) || 0) : parseNumber(st.subscription.robokassa_sum || 0);
       st.subscription.robokassa_sum = formatRublesFromNumber(rawNum);
+
       if (urlEl) {
         let updatedUrl = urlEl.value.trim();
         if (/OutSum=\d+/i.test(updatedUrl)) {
@@ -4057,8 +4062,27 @@ function renderOnboardingScreen() {
         }
         st.subscription.robokassa_url = updatedUrl;
       }
+
       if (notesEl) st.trainer_private_notes = notesEl.value.trim();
+
       saveAppData();
+
+      // Сохраняем напрямую в Supabase, чтобы настройки не слетали
+      if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+        try {
+          await supabaseClient
+            .from('students')
+            .update({
+              telegram_username: st.telegram_username,
+              subscription: st.subscription,
+              trainer_private_notes: st.trainer_private_notes
+            })
+            .eq('id', st.id);
+        } catch (err) {
+          console.error('Ошибка сохранения настроек в Supabase:', err);
+        }
+      }
+
       triggerHaptic('success');
       showToast('Контакт @username, настройки оплаты и заметка сохранены!');
       renderApp();
