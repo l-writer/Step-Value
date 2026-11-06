@@ -857,7 +857,71 @@
         arms: Number(rec.arms ?? rec.biceps ?? 38)
       };
     }
+const TELEGRAM_STORAGE_CONFIG = {
+      botToken: '8828760865:AAEJq5Rs8eSzg99UJvkl5s6wA1Axqd8OEkw',
+      channelId: '-1004321392864'
+    };
 
+    async function uploadMediaToTelegram(file, captionText = '') {
+      const formData = new FormData();
+      formData.append('chat_id', TELEGRAM_STORAGE_CONFIG.channelId);
+      formData.append('photo', file);
+      if (captionText) {
+        formData.append('caption', captionText);
+      }
+
+      const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_STORAGE_CONFIG.botToken}/sendPhoto`, {
+        method: 'POST',
+        body: formData
+      });
+
+      const result = await response.json();
+      if (!result.ok) {
+        throw new Error(result.description || 'Ошибка отправки в Telegram');
+      }
+
+      const photos = result.result.photo;
+      const bestPhoto = photos[photos.length - 1];
+      return {
+        file_id: bestPhoto.file_id,
+        message_id: result.result.message_id
+      };
+    }
+
+    async function handleReportPhotoUpload(event, recordType = 'weekly_photo') {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+
+      const currentStudent = (appData.students || []).find(s => String(s.id) === String(appData.current_student_id));
+      const studentName = currentStudent ? currentStudent.name : 'Подопечный';
+      const studentCode = currentStudent ? currentStudent.access_code : 'N/A';
+
+      showToast('Загружаем фото в архив...', 'info');
+
+      try {
+        const caption = `📌 Отчёт: ${studentName} (${studentCode})\nТип: ${recordType}\nДата: ${new Date().toLocaleDateString('ru-RU')}`;
+        const tgData = await uploadMediaToTelegram(file, caption);
+
+        if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+          await supabaseClient
+            .from('student_reports')
+            .insert([{
+              student_id: appData.current_student_id,
+              student_code: studentCode,
+              type: recordType,
+              photo_file_id: tgData.file_id,
+              telegram_msg_id: tgData.message_id,
+              created_at: new Date().toISOString()
+            }]);
+        }
+
+        showToast('Фото успешно прикреплено!', 'success');
+        if (typeof renderApp === 'function') renderApp();
+      } catch (err) {
+        console.error('Ошибка загрузки медиа:', err);
+        showToast('Ошибка загрузки: ' + err.message, 'error');
+      }
+    }
     function buildInitialSeedData() {
       const days = getUpcomingDays(10);
       const scheduleSlots = {};
@@ -2732,9 +2796,16 @@ function renderOnboardingScreen() {
               <button onclick="openStudentReportSubscreen(null)" class="text-xs font-semibold text-[#8B949E] hover:text-white flex items-center gap-1.5 py-1.5 px-3 rounded-xl bg-[#161B22] border border-[#30363D]">
                 <span>← Назад к отчётам</span>
               </button>
-              <button onclick="submitInBodyScanModal()" class="py-1.5 px-3 rounded-xl bg-[#10B981] text-[#090C10] text-xs font-extrabold flex items-center gap-1 shadow-neon">
-                <span>+ Внести замеры</span>
-              </button>
+              <div class="flex items-center gap-2">
+                <label class="cursor-pointer py-1.5 px-3 rounded-xl bg-[#161B22] border border-[#30363D] hover:border-[#00E676] text-xs font-semibold text-white transition flex items-center gap-1.5">
+                  <i data-lucide="camera" class="w-3.5 h-3.5 text-[#00E676]"></i>
+                  <span>Скан в ТГ</span>
+                  <input type="file" accept="image/*" class="hidden" onchange="handleReportPhotoUpload(event, 'inbody_scan')" />
+                </label>
+                <button onclick="submitInBodyScanModal()" class="py-1.5 px-3 rounded-xl bg-[#00E676] text-black font-semibold text-xs hover:bg-[#00c864] transition">
+                  <span>+ Внести замеры</span>
+                </button>
+              </div>
             </div>
 
             ${renderInBodyDetailedGrid(latest)}
