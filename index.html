@@ -1146,7 +1146,24 @@
       }
     }
 
-    async function submitTrainerPin() {
+  function toggleTrainerPinVisibility() {
+  const input = document.getElementById('input-trainer-pin');
+  const icon = document.getElementById('eye-icon-trainer-pin');
+  if (!input) return;
+
+  if (input.type === 'password') {
+    input.type = 'text';
+    if (icon) icon.setAttribute('data-lucide', 'eye-off');
+  } else {
+    input.type = 'password';
+    if (icon) icon.setAttribute('data-lucide', 'eye');
+  }
+  if (window.lucide && typeof lucide.createIcons === 'function') {
+    lucide.createIcons();
+  }
+}
+
+async function submitTrainerPin() {
   const input = document.getElementById('input-trainer-pin');
   const val = (input ? input.value : '').trim();
   const expected = (appData.trainer_profile.master_pin || '').trim();
@@ -1171,6 +1188,7 @@
     showToast('Неверный пароль тренера', 'error');
   }
 }
+
 
     async function submitStudentCode() {
   const input = document.getElementById('input-student-code');
@@ -1277,7 +1295,12 @@ function renderOnboardingScreen() {
                 </span>
                 <span class="text-[11px] text-[#8B949E]">Только для тренера</span>
               </div>
-              <input id="input-trainer-pin" type="password" value="" placeholder="Введите пароль доступа" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-4 py-3 text-sm font-medium text-white placeholder:text-[#484F58] outline-none select-text transition" style="-webkit-user-select: text !important; user-select: text !important;" />
+              <div class="relative flex items-center">
+                <input id="input-trainer-pin" type="password" value="" placeholder="Введите пароль доступа" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl pl-4 pr-11 py-3 text-sm font-medium text-white placeholder:text-[#484F58] outline-none select-text transition" style="-webkit-user-select: text !important; user-select: text !important;" />
+                <button type="button" onclick="toggleTrainerPinVisibility()" class="absolute right-3 p-1.5 text-[#8B949E] hover:text-[#00E676] transition flex items-center justify-center focus:outline-none" title="Показать / скрыть пароль">
+                  <i id="eye-icon-trainer-pin" data-lucide="eye" class="w-4 h-4"></i>
+                </button>
+              </div>
               <button onclick="submitTrainerPin()" class="mt-2 w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-bold text-xs uppercase tracking-wider shadow-neon active:scale-[0.99] transition">
                 Войти в панель тренера
               </button>
