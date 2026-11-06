@@ -32,26 +32,273 @@
       }
     }
 
+    function parseUsernameAndCode(rawUsername, explicitCode) {
+      const raw = String(rawUsername || '').trim();
+      if (explicitCode) {
+        return {
+          access_code: String(explicitCode).trim().toUpperCase(),
+          telegram_username: raw.includes('|') ? raw.split('|')[1].trim().replace(/^@/, '') : (raw.toUpperCase().startsWith('STEP-') ? '' : raw.replace(/^@/, ''))
+        };
+      }
+      if (raw.includes('|')) {
+        const [codePart, tgPart] = raw.split('|');
+        return {
+          access_code: (codePart || '').trim().toUpperCase(),
+          telegram_username: (tgPart || '').trim().replace(/^@/, '')
+        };
+      }
+      if (raw.toUpperCase().startsWith('STEP-')) {
+        return {
+          access_code: raw.toUpperCase(),
+          telegram_username: ''
+        };
+      }
+      return {
+        access_code: '',
+        telegram_username: raw.replace(/^@/, '')
+      };
+    }
+
+    function buildEncodedUsername(accessCode, tgUsername) {
+      const cleanCode = String(accessCode || '').trim().toUpperCase();
+      const cleanTg = String(tgUsername || '').trim().replace(/^@/, '');
+      if (cleanCode && cleanTg) return `${cleanCode}|${cleanTg}`;
+      if (cleanCode) return cleanCode;
+      return cleanTg;
+    }
+
+    async function persistScheduleSlotsToSupabase() {
+      if (!supabaseClient || !appData || !appData.schedule_slots) return false;
+      try {
+        const compactSchedule = {};
+        Object.keys(appData.schedule_slots).forEach(dateKey => {
+          compactSchedule[dateKey] = (appData.schedule_slots[dateKey] || []).map(s => ({
+            time: s.time,
+            duration: s.duration || 60,
+            is_open: Boolean(s.is_open),
+            booked_by: s.booked_by || null
+          }));
+        });
+        await supabaseClient
+          .from('student_reports')
+          .delete()
+          .eq('type', 'schedule_meta')
+          .eq('student_code', 'TRAINER_SCHEDULE');
+
+        await supabaseClient
+          .from('student_reports')
+          .insert([{
+            student_id: (currentUser && currentUser.id) ? currentUser.id : null,
+            student_code: 'TRAINER_SCHEDULE',
+            type: 'schedule_meta',
+            photo_file_id: JSON.stringify(compactSchedule),
+            telegram_msg_id: 0,
+            created_at: new Date().toISOString()
+          }]);
+        return true;
+      } catch (err) {
+        console.warn('Не удалось сохранить слоты расписания в облако:', err);
+        return false;
+      }
+    }
+
+    async function persistStudentToSupabase(st) {
+      if (!supabaseClient || !st) return false;
+      try {
+        if (!st.subscription) st.subscription = {};
+        const fullName = String(st.full_name || st.name || 'Атлет').trim();
+        const parts = fullName.split(/\s+/);
+        const firstName = parts[0] || 'Атлет';
+        const lastName = parts.slice(1).join(' ') || '';
+        const cleanTg = String(st.telegram_username || '').trim().replace(/^@/, '');
+        const cleanCode = String(st.access_code || '').trim().toUpperCase();
+        const encodedUsername = buildEncodedUsername(cleanCode, cleanTg);
+
+        let targetUserId = st.supabase_id || st.id;
+        const isLocalTempId = !targetUserId || String(targetUserId).startsWith('step-');
+
+        if (isLocalTempId) {
+          const { data: createdUser, error: createErr } = await supabaseClient
+            .from('users')
+            .insert([{
+              telegram_id: Date.now(),
+              first_name: firstName,
+              last_name: lastName,
+              username: encodedUsername,
+              role: 'student'
+            }])
+            .select()
+            .single();
+
+          if (createErr) throw createErr;
+          if (createdUser && createdUser.id) {
+            const oldId = st.id;
+            targetUserId = createdUser.id;
+            st.id = targetUserId;
+            st.supabase_id = targetUserId;
+            if (appData.current_student_id === oldId) appData.current_student_id = targetUserId;
+            if (uiState.selectedTrainerStudentId === oldId) uiState.selectedTrainerStudentId = targetUserId;
+          }
+        } else {
+          const { error: userUpdErr } = await supabaseClient
+            .from('users')
+            .update({
+              first_name: firstName,
+              last_name: lastName,
+              username: encodedUsername
+            })
+            .eq('id', targetUserId);
+          if (userUpdErr) {
+            console.warn('Предупреждение при обновлении users:', userUpdErr);
+          }
+        }
+
+        const totalSessions = Math.max(0, Number(st.subscription.total ?? st.subscription.total_sessions ?? 0) || 0);
+        const usedSessions = Math.min(totalSessions, Math.max(0, Number(st.subscription.used ?? st.subscription.used_sessions ?? 0) || 0));
+        const remainingSessions = Math.max(0, totalSessions - usedSessions);
+        const durationMins = Number(st.session_duration) || 60;
+        const billingDay = Math.min(28, Math.max(1, Number(st.subscription.payment_day ?? st.subscription.billing_day) || 1));
+        const robokassaSum = st.subscription.robokassa_sum || '0 ₽';
+        const robokassaUrl = st.subscription.robokassa_url || '';
+
+        st.subscription.total = totalSessions;
+        st.subscription.total_sessions = totalSessions;
+        st.subscription.used = usedSessions;
+        st.subscription.used_sessions = usedSessions;
+        st.subscription.remaining = remainingSessions;
+        st.subscription.payment_day = billingDay;
+        st.subscription.billing_day = billingDay;
+        st.subscription.robokassa_sum = robokassaSum;
+        st.subscription.robokassa_url = robokassaUrl;
+
+        const coreSubPayload = {
+          student_id: targetUserId,
+          total_sessions: Number(totalSessions) || 0,
+          used_sessions: Number(usedSessions) || 0,
+          session_duration_minutes: Number(durationMins) || 60,
+          billing_day: Number(billingDay) || 1,
+          status: 'active'
+        };
+
+        let subId = st.subscription.id;
+        if (!subId) {
+          const { data: existingSubs } = await supabaseClient
+            .from('subscriptions')
+            .select('id')
+            .eq('student_id', targetUserId)
+            .eq('status', 'active')
+            .order('id', { ascending: false })
+            .limit(1);
+          if (existingSubs && existingSubs.length > 0) {
+            subId = existingSubs[0].id;
+            st.subscription.id = subId;
+          }
+        }
+
+        if (subId) {
+          const { data: updSub, error: subUpdErr } = await supabaseClient
+            .from('subscriptions')
+            .update(coreSubPayload)
+            .eq('id', subId)
+            .select()
+            .maybeSingle();
+
+          if (subUpdErr) {
+            console.warn('Предупреждение при обновлении subscriptions:', subUpdErr);
+          } else if (updSub) {
+            currentSubscription = updSub;
+          }
+        } else {
+          const { data: insSub, error: subInsErr } = await supabaseClient
+            .from('subscriptions')
+            .insert([coreSubPayload])
+            .select()
+            .maybeSingle();
+
+          if (subInsErr) {
+            console.warn('Предупреждение при создании subscriptions:', subInsErr);
+          } else if (insSub) {
+            st.subscription.id = insSub.id;
+            currentSubscription = insSub;
+          }
+        }
+
+        try {
+          const metaObject = {
+            access_code: cleanCode,
+            telegram_username: cleanTg,
+            full_name: fullName,
+            avatar: st.avatar || 'АТ',
+            status: st.status || 'active',
+            session_duration: durationMins,
+            freeze_details: st.freeze_details || { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
+            subscription: {
+              id: st.subscription.id || null,
+              total: totalSessions,
+              total_sessions: totalSessions,
+              used: usedSessions,
+              used_sessions: usedSessions,
+              remaining: remainingSessions,
+              payment_day: billingDay,
+              billing_day: billingDay,
+              robokassa_sum: robokassaSum,
+              robokassa_url: robokassaUrl
+            },
+            payment_history: Array.isArray(st.payment_history) ? st.payment_history : [],
+            medical_notes: st.medical_notes || '',
+            trainer_private_notes: st.trainer_private_notes || '',
+            notification_settings: st.notification_settings || { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+            workouts: Array.isArray(st.workouts) ? st.workouts : [],
+            anthropometry: Array.isArray(st.anthropometry) ? st.anthropometry : [],
+            checkups: Array.isArray(st.checkups) ? st.checkups : [],
+            inbody: Array.isArray(st.inbody) ? st.inbody : [],
+            photo_reports: Array.isArray(st.photo_reports) ? st.photo_reports : []
+          };
+
+          await supabaseClient
+            .from('student_reports')
+            .delete()
+            .eq('student_id', targetUserId)
+            .eq('type', 'profile_meta');
+
+          await supabaseClient
+            .from('student_reports')
+            .insert([{
+              student_id: targetUserId,
+              student_code: cleanCode || 'N/A',
+              type: 'profile_meta',
+              photo_file_id: JSON.stringify(metaObject),
+              telegram_msg_id: 0,
+              created_at: new Date().toISOString()
+            }]);
+        } catch (metaErr) {
+          console.warn('Не удалось записать profile_meta в student_reports:', metaErr);
+        }
+
+        return true;
+      } catch (err) {
+        console.error('Ошибка сохранения данных подопечного в Supabase:', err);
+        return false;
+      }
+    }
+
     function syncSupabaseStateToLocalApp(user, sub, bookings, preferredStudentId = null) {
       if (typeof appData === 'undefined' || !appData || !Array.isArray(appData.students)) return;
       if (!user || !user.id) return;
+      if (user.role === 'coach' || user.role === 'trainer') return;
 
       let student = null;
       if (preferredStudentId) {
-        student = appData.students.find(s => s.id === preferredStudentId || s.access_code === preferredStudentId);
+        student = appData.students.find(s => s.id === preferredStudentId || s.supabase_id === preferredStudentId || s.access_code === preferredStudentId);
       }
       if (!student) {
         student = appData.students.find(s => s.id === user.id || s.supabase_id === user.id);
-      }
-      if (!student) {
-        student = appData.students.find(s => s.id === appData.current_student_id) || appData.students[0];
       }
       if (!student) return;
 
       const oldId = student.id;
       const newId = user.id;
 
-      // Синхронизируем UUID пользователя между профилем и слотами расписания
       if (oldId !== newId) {
         student.id = newId;
         student.supabase_id = newId;
@@ -71,214 +318,264 @@
         student.supabase_id = newId;
       }
 
-      if (user.name && !user.name.startsWith('Демо ')) {
-        student.full_name = user.name;
+      const fullName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || user.name || '';
+      if (fullName && !fullName.startsWith('Демо ')) {
+        student.full_name = fullName;
       }
 
       if (sub) {
         currentSubscription = sub;
-        const total = Number(sub.total_sessions) || 12;
-        const used = Number(sub.used_sessions) || 0;
+        const total = Math.max(0, Number(sub.total_sessions ?? student.subscription?.total ?? 0) || 0);
+        const used = Math.min(total, Math.max(0, Number(sub.used_sessions ?? student.subscription?.used ?? 0) || 0));
         const remaining = Math.max(0, total - used);
-        const dur = Number(sub.session_duration_minutes) || student.session_duration || 120;
-        const billDay = Number(sub.billing_day) || (student.subscription && student.subscription.payment_day) || 7;
+        const dur = Number(sub.session_duration_minutes) || student.session_duration || 60;
+        const billDay = Math.min(28, Math.max(1, Number(sub.billing_day ?? student.subscription?.payment_day) || 1));
 
         student.session_duration = dur;
         if (!student.subscription) student.subscription = {};
         student.subscription.id = sub.id;
         student.subscription.total = total;
+        student.subscription.total_sessions = total;
         student.subscription.used = used;
+        student.subscription.used_sessions = used;
         student.subscription.remaining = remaining;
         student.subscription.payment_day = billDay;
+        student.subscription.billing_day = billDay;
+        if (sub.robokassa_sum !== undefined) student.subscription.robokassa_sum = sub.robokassa_sum;
+        if (sub.robokassa_url !== undefined) student.subscription.robokassa_url = sub.robokassa_url;
       }
 
       if (Array.isArray(bookings)) {
         const confirmed = bookings.filter(b => !b.status || b.status === 'confirmed');
-        // Если в Supabase есть реальные бронирования, синхронизируем их с локальной сеткой
-        if (confirmed.length > 0) {
-          if (appData.schedule_slots) {
-            Object.keys(appData.schedule_slots).forEach(dateKey => {
-              (appData.schedule_slots[dateKey] || []).forEach(slot => {
-                if (slot.booked_by === student.id) {
-                  slot.booked_by = null;
-                  slot.is_open = true;
+        if (appData.schedule_slots) {
+          Object.keys(appData.schedule_slots).forEach(dateKey => {
+            (appData.schedule_slots[dateKey] || []).forEach(slot => {
+              if (slot.booked_by === student.id) {
+                slot.booked_by = null;
+                slot.is_open = true;
+              }
+            });
+          });
+        }
+
+        student.active_bookings = confirmed.map(b => {
+          const dur = Number(b.duration_minutes) || student.session_duration || 60;
+          const dateStr = b.session_date;
+          const timeStr = b.session_time;
+          if (appData.schedule_slots && appData.schedule_slots[dateStr]) {
+            const daySlots = appData.schedule_slots[dateStr];
+            const startIdx = daySlots.findIndex(s => s.time === timeStr);
+            const hoursNeeded = Math.ceil(dur / 60);
+            if (startIdx !== -1) {
+              for (let k = 0; k < hoursNeeded; k++) {
+                if (daySlots[startIdx + k]) {
+                  daySlots[startIdx + k].booked_by = student.id;
+                }
+              }
+            }
+          }
+          return {
+            id: b.id || ('bk-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5)),
+            date: dateStr,
+            time: timeStr,
+            duration: dur
+          };
+        });
+        student.active_bookings.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+      }
+    }
+
+    async function syncAllStudentsFromSupabase() {
+      if (!supabaseClient) return;
+      try {
+        const [usersRes, subsRes, bksRes, reportsRes] = await Promise.all([
+          supabaseClient.from('users').select('*').eq('role', 'student'),
+          supabaseClient.from('subscriptions').select('*').eq('status', 'active'),
+          supabaseClient.from('bookings').select('*').eq('status', 'confirmed'),
+          supabaseClient.from('student_reports').select('*').in('type', ['profile_meta', 'schedule_meta'])
+        ]);
+
+        const users = usersRes.data;
+        if (usersRes.error || !Array.isArray(users)) return;
+
+        const subs = Array.isArray(subsRes.data) ? subsRes.data : [];
+        const bks = Array.isArray(bksRes.data) ? bksRes.data : [];
+        const reports = Array.isArray(reportsRes.data) ? reportsRes.data : [];
+
+        const scheduleReport = reports.find(r => r.type === 'schedule_meta' && r.student_code === 'TRAINER_SCHEDULE');
+        if (scheduleReport && scheduleReport.photo_file_id) {
+          try {
+            const parsedSchedule = JSON.parse(scheduleReport.photo_file_id);
+            if (parsedSchedule && typeof parsedSchedule === 'object') {
+              Object.keys(parsedSchedule).forEach(dateKey => {
+                if (Array.isArray(parsedSchedule[dateKey])) {
+                  appData.schedule_slots[dateKey] = parsedSchedule[dateKey].map(s => ({
+                    time: s.time,
+                    duration: s.duration || 60,
+                    is_open: Boolean(s.is_open),
+                    booked_by: null
+                  }));
                 }
               });
-            });
-          }
+            }
+          } catch (e) {}
+        }
 
-          student.active_bookings = confirmed.map(b => {
-            const dur = Number(b.duration_minutes) || student.session_duration || 120;
+        if (appData.schedule_slots) {
+          Object.keys(appData.schedule_slots).forEach(dateKey => {
+            (appData.schedule_slots[dateKey] || []).forEach(slot => {
+              slot.booked_by = null;
+            });
+          });
+        }
+
+        const subsMap = new Map();
+        subs.forEach(s => {
+          const prev = subsMap.get(s.student_id);
+          if (!prev || Number(s.id) > Number(prev.id)) {
+            subsMap.set(s.student_id, s);
+          }
+        });
+
+        const bksMap = new Map();
+        bks.forEach(b => {
+          if (!bksMap.has(b.student_id)) bksMap.set(b.student_id, []);
+          bksMap.get(b.student_id).push(b);
+        });
+
+        const metaMap = new Map();
+        reports.filter(r => r.type === 'profile_meta').forEach(r => {
+          try {
+            const parsed = JSON.parse(r.photo_file_id || '{}');
+            if (r.student_id) metaMap.set(String(r.student_id), parsed);
+            if (r.student_code) metaMap.set(String(r.student_code).toUpperCase(), parsed);
+          } catch (e) {}
+        });
+
+        const existingMap = new Map();
+        (appData.students || []).forEach(s => {
+          if (s.id) existingMap.set(String(s.id), s);
+          if (s.access_code) existingMap.set(String(s.access_code).toUpperCase(), s);
+        });
+
+        const deduplicatedUsers = [];
+        const seenKeys = new Set();
+        for (let i = users.length - 1; i >= 0; i--) {
+          const u = users[i];
+          const parsedInfo = parseUsernameAndCode(u.username, u.access_code);
+          const key = parsedInfo.access_code || String(u.id);
+          if (seenKeys.has(key)) continue;
+          seenKeys.add(key);
+          deduplicatedUsers.unshift(u);
+        }
+
+        const usedCodes = new Set();
+        const freshStudents = [];
+
+        deduplicatedUsers.forEach(u => {
+          const parsedInfo = parseUsernameAndCode(u.username, u.access_code);
+          const meta = metaMap.get(String(u.id)) || (parsedInfo.access_code ? metaMap.get(parsedInfo.access_code) : null) || {};
+          const prevSt = existingMap.get(String(u.id)) || (parsedInfo.access_code ? existingMap.get(parsedInfo.access_code) : null) || null;
+
+          const userFullName = `${u.first_name || ''} ${u.last_name || ''}`.trim() || meta.full_name || prevSt?.full_name || 'Атлет';
+          const userSub = subsMap.get(u.id);
+          const userBks = bksMap.get(u.id) || [];
+
+          const hasSubRecord = Boolean(userSub);
+          const total = Math.max(0, Number(hasSubRecord ? userSub.total_sessions : (meta?.subscription?.total ?? prevSt?.subscription?.total ?? 0)) || 0);
+          const used = Math.min(total, Math.max(0, Number(hasSubRecord ? userSub.used_sessions : (meta?.subscription?.used ?? prevSt?.subscription?.used ?? 0)) || 0));
+          const remaining = Math.max(0, total - used);
+          const dur = Number(hasSubRecord ? userSub.session_duration_minutes : (meta?.session_duration ?? prevSt?.session_duration)) || 60;
+          const billDay = Math.min(28, Math.max(1, Number(hasSubRecord ? userSub.billing_day : (meta?.subscription?.payment_day ?? prevSt?.subscription?.payment_day)) || 1));
+
+          const rawSum = userSub?.robokassa_sum ?? meta?.subscription?.robokassa_sum ?? prevSt?.subscription?.robokassa_sum ?? '0 ₽';
+          const cleanSumStr = typeof rawSum === 'number'
+            ? formatRublesFromNumber(rawSum)
+            : (String(rawSum).includes('₽') ? String(rawSum) : formatRublesFromNumber(parseNumericRubles(rawSum)));
+          const cleanUrlStr = userSub?.robokassa_url ?? meta?.subscription?.robokassa_url ?? prevSt?.subscription?.robokassa_url ?? '';
+
+          let code = parsedInfo.access_code || meta.access_code || prevSt?.access_code || '';
+          if (!code || usedCodes.has(code)) {
+            let num = 104;
+            while (usedCodes.has(`STEP-${num}`)) num++;
+            code = `STEP-${num}`;
+          }
+          usedCodes.add(code);
+
+          const tgUsername = parsedInfo.telegram_username || u.telegram_username || meta.telegram_username || prevSt?.telegram_username || '';
+          const parts = userFullName.split(/\s+/);
+          const initials = ((parts[0] ? parts[0][0] : 'А') + (parts[1] ? parts[1][0] : 'Т')).toUpperCase();
+
+          const mappedBookings = userBks.map(b => {
+            const bDur = Number(b.duration_minutes) || dur;
             const dateStr = b.session_date;
             const timeStr = b.session_time;
             if (appData.schedule_slots && appData.schedule_slots[dateStr]) {
               const daySlots = appData.schedule_slots[dateStr];
               const startIdx = daySlots.findIndex(s => s.time === timeStr);
-              const hoursNeeded = Math.ceil(dur / 60);
+              const hoursNeeded = Math.ceil(bDur / 60);
               if (startIdx !== -1) {
                 for (let k = 0; k < hoursNeeded; k++) {
                   if (daySlots[startIdx + k]) {
-                    daySlots[startIdx + k].booked_by = student.id;
+                    daySlots[startIdx + k].booked_by = u.id;
                   }
                 }
               }
             }
             return {
-              id: b.id || ('bk-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5)),
+              id: b.id,
               date: dateStr,
               time: timeStr,
-              duration: dur
+              duration: bDur
             };
+          }).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+
+          const freezeDetails = u.freeze_details || meta.freeze_details || prevSt?.freeze_details || { is_frozen: false, from: '2026-11-01', to: '2026-11-15' };
+
+          freshStudents.push({
+            id: u.id,
+            supabase_id: u.id,
+            telegram_id: u.telegram_id || null,
+            access_code: code,
+            telegram_username: tgUsername,
+            full_name: userFullName,
+            avatar: meta.avatar || prevSt?.avatar || initials,
+            status: freezeDetails.is_frozen ? 'frozen' : 'active',
+            freeze_details: freezeDetails,
+            session_duration: dur,
+            subscription: {
+              id: userSub?.id || meta?.subscription?.id || prevSt?.subscription?.id || null,
+              total: total,
+              total_sessions: total,
+              used: used,
+              used_sessions: used,
+              remaining: remaining,
+              payment_day: billDay,
+              billing_day: billDay,
+              robokassa_sum: cleanSumStr,
+              robokassa_url: cleanUrlStr
+            },
+            payment_history: Array.isArray(meta.payment_history) ? meta.payment_history : (Array.isArray(prevSt?.payment_history) ? prevSt.payment_history : []),
+            medical_notes: u.medical_notes ?? meta.medical_notes ?? prevSt?.medical_notes ?? '',
+            trainer_private_notes: u.trainer_private_notes ?? meta.trainer_private_notes ?? prevSt?.trainer_private_notes ?? '',
+            notification_settings: u.notification_settings || meta.notification_settings || prevSt?.notification_settings || { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+            workouts: Array.isArray(u.workouts) ? u.workouts : (Array.isArray(meta.workouts) ? meta.workouts : (Array.isArray(prevSt?.workouts) ? prevSt.workouts : [])),
+            anthropometry: (Array.isArray(u.anthropometry) ? u.anthropometry : (Array.isArray(meta.anthropometry) ? meta.anthropometry : (Array.isArray(prevSt?.anthropometry) ? prevSt.anthropometry : []))).map(normalizeAnthropometryRecord),
+            checkups: Array.isArray(u.checkups) ? u.checkups : (Array.isArray(meta.checkups) ? meta.checkups : (Array.isArray(prevSt?.checkups) ? prevSt.checkups : [])),
+            inbody: (Array.isArray(u.inbody) ? u.inbody : (Array.isArray(meta.inbody) ? meta.inbody : (Array.isArray(prevSt?.inbody) ? prevSt.inbody : []))).map(enrichInBodyRecord),
+            photo_reports: Array.isArray(u.photo_reports) && u.photo_reports.length > 0
+              ? u.photo_reports
+              : (Array.isArray(meta.photo_reports) && meta.photo_reports.length > 0
+                  ? meta.photo_reports
+                  : (Array.isArray(prevSt?.photo_reports) ? prevSt.photo_reports : [])),
+            active_bookings: mappedBookings
           });
-          student.active_bookings.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
-        }
-      }
-
-
-    }
-
-
-    async function syncAllStudentsFromSupabase() {
-      if (!supabaseClient) return;
-      try {
-        const { data: users, error: uErr } = await supabaseClient
-          .from('users')
-          .select('*')
-          .eq('role', 'student');
-
-        if (uErr || !Array.isArray(users) || users.length === 0) return;
-
-        const { data: subs } = await supabaseClient
-          .from('subscriptions')
-          .select('*')
-          .eq('status', 'active');
-
-        const { data: bks } = await supabaseClient
-          .from('bookings')
-          .select('*')
-          .eq('status', 'confirmed');
-
-        const subsMap = new Map();
-        if (Array.isArray(subs)) {
-          subs.forEach(s => subsMap.set(s.student_id, s));
-        }
-
-        const bksMap = new Map();
-        if (Array.isArray(bks)) {
-          bks.forEach(b => {
-            if (!bksMap.has(b.student_id)) bksMap.set(b.student_id, []);
-            bksMap.get(b.student_id).push(b);
-          });
-        }
-
-        users.forEach(u => {
-          let st = (appData.students || []).find(s => 
-            s.id === u.id || 
-            s.supabase_id === u.id || 
-            (u.username && s.access_code && s.access_code.toUpperCase() === u.username.toUpperCase()) ||
-            (u.username && s.telegram_username && s.telegram_username.toLowerCase() === u.username.toLowerCase())
-          );
-
-          const userFullName = `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.username || 'Атлет';
-          const userSub = subsMap.get(u.id);
-          const userBks = bksMap.get(u.id) || [];
-
-          const total = Math.max(1, Number(userSub?.total_sessions) || (st?.subscription?.total) || 12);
-          const used = Math.min(total, Math.max(0, Number(userSub?.used_sessions) || 0));
-          const remaining = Math.max(0, total - used);
-          const dur = Number(userSub?.session_duration_minutes) || (st?.session_duration) || 120;
-          const billDay = Number(userSub?.billing_day) || (st?.subscription?.payment_day) || 5;
-
-          if (st) {
-            st.id = u.id;
-            st.supabase_id = u.id;
-            if (!st.full_name || st.full_name.startsWith('Новый')) {
-              st.full_name = userFullName;
-            }
-            st.session_duration = dur;
-            if (!st.subscription) st.subscription = {};
-            st.subscription.id = userSub?.id || st.subscription.id;
-            st.subscription.total = total;
-            st.subscription.total_sessions = total;
-            st.subscription.used = used;
-            st.subscription.used_sessions = used;
-            st.subscription.remaining = remaining;
-            st.subscription.payment_day = billDay;
-
-            if (userBks.length > 0) {
-              st.active_bookings = userBks.map(b => ({
-                id: b.id,
-                date: b.session_date,
-                time: b.session_time,
-                duration: Number(b.duration_minutes) || dur
-              }));
-            }
-          } else {
-            const parts = userFullName.split(' ');
-            const initials = ((parts[0] ? parts[0][0] : 'А') + (parts[1] ? parts[1][0] : 'В')).toUpperCase();
-            const code = (u.username && u.username.toUpperCase().startsWith('STEP-')) 
-              ? u.username.toUpperCase() 
-              : generateFreeStudentAccessCode();
-
-            const newSt = {
-              id: u.id,
-              supabase_id: u.id,
-              access_code: code,
-              telegram_username: u.username || '',
-              full_name: userFullName,
-              avatar: initials,
-              status: 'active',
-              freeze_details: { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
-              session_duration: dur,
-              subscription: {
-                id: userSub?.id,
-                total: total,
-                total_sessions: total,
-                used: used,
-                used_sessions: used,
-                remaining: remaining,
-                payment_day: billDay,
-                robokassa_sum: '24 000 ₽',
-                robokassa_url: 'https://auth.robokassa.ru/Merchant/Index.aspx?MerchantLogin=StepValueCoach&OutSum=24000'
-              },
-              payment_history: [
-                { date: formatDotDate(formatISO(getTodayDateObj())), count: total, amount: '24 000 ₽', status: 'Оплачено' }
-              ],
-              medical_notes: 'Ограничений пока не указано',
-              trainer_private_notes: '',
-              notification_settings: { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
-              workouts: [],
-              anthropometry: [
-                { date: formatDotDate(formatISO(getTodayDateObj())), chest: 100, waist: 80, arms: 36 }
-              ],
-              checkups: [],
-              inbody: [
-                enrichInBodyRecord({ date: formatDotDate(formatISO(getTodayDateObj())), muscle_mass: 35.0, body_fat_pct: 16.0, water: 46.0, weight: 78.0 })
-              ],
-              photo_reports: [
-                {
-                  date: 'Октябрь 2026',
-                  front_url: createSilhouetteDataUri('Октябрь 2026', 'СПЕРЕДИ', 6, 2, '#00E676'),
-                  side_url: createSilhouetteDataUri('Октябрь 2026', 'СБОКУ', 6, 2, '#00E676'),
-                  back_url: createSilhouetteDataUri('Октябрь 2026', 'СЗАДИ', 6, 2, '#00E676'),
-                  front_custom: false,
-                  side_custom: false,
-                  back_custom: false
-                }
-              ],
-              active_bookings: userBks.map(b => ({
-                id: b.id,
-                date: b.session_date,
-                time: b.session_time,
-                duration: Number(b.duration_minutes) || dur
-              }))
-            };
-
-            appData.students.push(newSt);
-          }
         });
 
-        saveAppData();
+        appData.students = freshStudents;
+        if (appData.current_student_id && !appData.students.some(s => s.id === appData.current_student_id)) {
+          appData.current_student_id = appData.students[0] ? appData.students[0].id : null;
+        }
         renderApp();
       } catch (err) {
         console.warn('Ошибка синхронизации студентов из Supabase:', err);
@@ -286,87 +583,99 @@
     }
 
     async function getOrCreateSupabaseUser(role = 'student', options = {}) {
-  const normalizedDbRole = (role === 'trainer' || role === 'coach') ? 'coach' : 'student';
-  const preferredStudent = options.student || null;
+      const normalizedDbRole = (role === 'trainer' || role === 'coach') ? 'coach' : 'student';
+      const preferredStudent = options.student || null;
 
-  try {
-    if (!supabaseClient) {
-      throw new Error('Supabase SDK не инициализирован');
+      try {
+        if (!supabaseClient) {
+          throw new Error('Supabase SDK не инициализирован');
+        }
+
+        if (normalizedDbRole === 'coach') {
+          await syncAllStudentsFromSupabase();
+          return { user: currentUser, sub: null };
+        }
+
+        let user = null;
+        if (preferredStudent && preferredStudent.id && !String(preferredStudent.id).startsWith('step-')) {
+          const { data: byId } = await supabaseClient
+            .from('users')
+            .select('*')
+            .eq('id', preferredStudent.id)
+            .maybeSingle();
+          if (byId) user = byId;
+        }
+
+        if (!user && preferredStudent && preferredStudent.access_code) {
+          const codeUpper = preferredStudent.access_code.trim().toUpperCase();
+          const { data: byCodeList } = await supabaseClient
+            .from('users')
+            .select('*')
+            .eq('role', 'student')
+            .ilike('username', `${codeUpper}%`);
+          if (Array.isArray(byCodeList) && byCodeList.length > 0) {
+            user = byCodeList[byCodeList.length - 1];
+          }
+        }
+
+        if (!user) {
+          return { user: null, sub: null };
+        }
+
+        const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
+        if (tgUser?.id && Number(user.telegram_id) !== Number(tgUser.id)) {
+          await supabaseClient
+            .from('users')
+            .update({ telegram_id: Number(tgUser.id) })
+            .eq('id', user.id);
+          user.telegram_id = Number(tgUser.id);
+        }
+
+        let { data: subsList } = await supabaseClient
+          .from('subscriptions')
+          .select('*')
+          .eq('student_id', user.id)
+          .eq('status', 'active')
+          .order('id', { ascending: false })
+          .limit(1);
+
+        let sub = (subsList && subsList.length > 0) ? subsList[0] : null;
+
+        if (!sub) {
+          const { data: newSub, error: subCreateErr } = await supabaseClient
+            .from('subscriptions')
+            .insert([{
+              student_id: user.id,
+              total_sessions: 0,
+              used_sessions: 0,
+              session_duration_minutes: preferredStudent?.session_duration || 60,
+              billing_day: preferredStudent?.subscription?.payment_day || 1,
+              status: 'active'
+            }])
+            .select()
+            .maybeSingle();
+
+          if (!subCreateErr && newSub) sub = newSub;
+        }
+
+        const { data: userBks } = await supabaseClient
+          .from('bookings')
+          .select('*')
+          .eq('student_id', user.id)
+          .eq('status', 'confirmed');
+
+        currentUser = user;
+        if (sub) currentSubscription = sub;
+
+        syncSupabaseStateToLocalApp(user, sub, userBks || [], preferredStudent ? preferredStudent.id : user.id);
+        renderApp();
+
+        return { user, sub };
+      } catch (err) {
+        console.error('Ошибка в getOrCreateSupabaseUser:', err);
+        return { user: null, sub: null };
+      }
     }
-
-    const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
-    const telegramId = tgUser?.id ? Number(tgUser.id) : 999999999;
-    const studentFullName = preferredStudent?.full_name || preferredStudent?.name || '';
-    const firstName = tgUser?.first_name || (studentFullName ? studentFullName.split(' ')[0] : (normalizedDbRole === 'coach' ? 'Денис' : 'Александр'));
-    const lastName = tgUser?.last_name || (studentFullName ? studentFullName.split(' ').slice(1).join(' ') : 'Воронов');
-    const username = tgUser?.username || '';
-
-    // 1. Ищем пользователя по telegram_id
-    let { data: user, error: selectErr } = await supabaseClient
-      .from('users')
-      .select('*')
-      .eq('telegram_id', telegramId)
-      .maybeSingle();
-
-    if (selectErr) console.warn("Supabase select warning:", selectErr);
-
-    // 2. Если нет — создаем с обязательным полем first_name
-    if (!user) {
-      const { data: newUser, error: createError } = await supabaseClient
-        .from('users')
-        .insert([{
-          telegram_id: telegramId,
-          first_name: firstName,
-          last_name: lastName,
-          username: username,
-          role: normalizedDbRole
-        }])
-        .select()
-        .single();
-
-      if (createError) throw createError;
-      user = newUser;
-    }
-
-    // 3. Синхронизируем абонемент
-    let { data: sub } = await supabaseClient
-      .from('subscriptions')
-      .select('*')
-      .eq('student_id', user.id)
-      .eq('status', 'active')
-      .maybeSingle();
-
-    if (!sub) {
-      const { data: newSub, error: subCreateErr } = await supabaseClient
-        .from('subscriptions')
-        .insert([{
-          student_id: user.id,
-          total_sessions: 12,
-          used_sessions: 0,
-          session_duration_minutes: 120,
-          billing_day: 7,
-          status: 'active'
-        }])
-        .select()
-        .single();
-
-      if (!subCreateErr) sub = newSub;
-    }
-
-    currentUser = user;
-    if (sub) currentSubscription = sub;
-    localStorage.setItem('sv_user', JSON.stringify(user));
-    if (sub) localStorage.setItem('sv_sub', JSON.stringify(sub));
-
-    // Синхронизируем полученное состояние с локальным приложением
-    syncSupabaseStateToLocalApp(user, sub, [], preferredStudent ? preferredStudent.id : null);
-
-    return { user, sub };
-  } catch (err) {
-    console.error("Ошибка в getOrCreateSupabaseUser:", err);
-    throw err;
-  }
-}
 
     const authenticateUser = getOrCreateSupabaseUser;
 
@@ -377,31 +686,23 @@
           return null;
         }
 
-        // 1. Проверяем или восстанавливаем авторизацию пользователя
-        let user = currentUser;
-        if (!user || !user.id) {
-          try {
-            const rawUser = localStorage.getItem('sv_user');
-            if (rawUser) user = JSON.parse(rawUser);
-          } catch (e) {}
-        }
+        const currentSt = typeof getCurrentStudent === 'function' ? getCurrentStudent() : null;
+        let userId = (currentSt && (currentSt.supabase_id || currentSt.id)) || (currentUser && currentUser.id);
 
-        if (!user || !user.id) {
-          const currentSt = typeof getCurrentStudent === 'function' ? getCurrentStudent() : null;
+        if (!userId || String(userId).startsWith('step-')) {
           const authRes = await getOrCreateSupabaseUser('student', { autoEnter: true, student: currentSt });
-          user = authRes ? authRes.user : null;
+          userId = authRes && authRes.user ? authRes.user.id : null;
         }
 
-        if (!user || !user.id) {
-          notifyUser('Не удалось войти. Проверьте подключение и попробуйте снова.', 'error');
+        if (!userId) {
+          notifyUser('Не удалось определить профиль ученика в базе данных.', 'error');
           return null;
         }
 
-        // 2. Проверяем реальный остаток занятий в таблице subscriptions в Supabase
         let { data: subsList, error: subError } = await supabaseClient
           .from('subscriptions')
           .select('*')
-          .eq('student_id', user.id)
+          .eq('student_id', userId)
           .eq('status', 'active')
           .order('id', { ascending: false })
           .limit(1);
@@ -411,27 +712,12 @@
         let sub = (subsList && subsList.length > 0) ? subsList[0] : null;
 
         if (!sub) {
-          const { data: createdSubs, error: insErr } = await supabaseClient
-            .from('subscriptions')
-            .insert([{
-              student_id: user.id,
-              total_sessions: 12,
-              used_sessions: 0,
-              session_duration_minutes: 120,
-              billing_day: 7,
-              status: 'active'
-            }])
-            .select();
-          if (insErr) throw insErr;
-          sub = (createdSubs && createdSubs.length > 0) ? createdSubs[0] : null;
+          notifyUser('У вас пока нет активного пакета тренировок. Обратитесь к тренеру.', 'error');
+          return null;
         }
 
-        if (!sub) {
-          throw new Error('Не удалось найти или создать активный абонемент');
-        }
-
-        const totalSessions = Number(sub.total_sessions) || 0;
-        const usedSessions = Number(sub.used_sessions) || 0;
+        const totalSessions = Math.max(0, Number(sub.total_sessions) || 0);
+        const usedSessions = Math.max(0, Number(sub.used_sessions) || 0);
         const remainingSessions = totalSessions - usedSessions;
 
         if (remainingSessions <= 0) {
@@ -439,13 +725,12 @@
           return null;
         }
 
-        const durationMinutes = Number(sub.session_duration_minutes) || 120;
+        const durationMinutes = Number(sub.session_duration_minutes) || (currentSt && currentSt.session_duration) || 60;
 
-        // 3. Добавляем строку в таблицу bookings
         const { data: insertedBookings, error: bookError } = await supabaseClient
           .from('bookings')
           .insert([{
-            student_id: user.id,
+            student_id: userId,
             session_date: date,
             session_time: time,
             duration_minutes: durationMinutes,
@@ -456,7 +741,6 @@
         if (bookError) throw bookError;
         const createdBooking = (insertedBookings && insertedBookings.length > 0) ? insertedBookings[0] : null;
 
-        // 4. Обновляем счетчик used_sessions = used_sessions + 1 в subscriptions
         const newUsedSessions = usedSessions + 1;
         const { data: updatedSubs, error: updateError } = await supabaseClient
           .from('subscriptions')
@@ -471,14 +755,20 @@
           : { ...sub, used_sessions: newUsedSessions };
 
         currentSubscription = updatedSub;
+        if (currentSt) {
+          currentSt.subscription.used = newUsedSessions;
+          currentSt.subscription.used_sessions = newUsedSessions;
+          currentSt.subscription.remaining = Math.max(0, totalSessions - newUsedSessions);
+          await persistStudentToSupabase(currentSt);
+        }
 
         return {
           success: true,
-          user,
+          user: { id: userId },
           sub: updatedSub,
           booking: createdBooking || {
             id: 'bk-' + Date.now(),
-            student_id: user.id,
+            student_id: userId,
             session_date: date,
             session_time: time,
             duration_minutes: durationMinutes,
@@ -817,42 +1107,40 @@
       return slots;
     }
 
-    const STORAGE_KEY = 'step_value_data_v2';
-
-    function enrichInBodyRecord(rec) {
-      const weight = Number(rec.weight) || 81.8;
-      const muscle = Number(rec.muscle_mass) || 38.4;
-      const fatPct = Number(rec.body_fat_pct) || 14.2;
-      const water = Number(rec.water) || 49.5;
-      const ffm = rec.fat_free_mass !== undefined ? Number(rec.fat_free_mass) : +(weight * (1 - fatPct / 100)).toFixed(1);
+    function enrichInBodyRecord(rec = {}) {
+      const weight = Number(rec.weight) || 0;
+      const muscle = Number(rec.muscle_mass) || 0;
+      const fatPct = Number(rec.body_fat_pct) || 0;
+      const water = Number(rec.water) || 0;
+      const ffm = rec.fat_free_mass !== undefined ? Number(rec.fat_free_mass) : (weight > 0 ? +(weight * (1 - fatPct / 100)).toFixed(1) : 0);
       return {
-        date: rec.date || '01.10.2026',
+        date: rec.date || formatDotDate(formatISO(getTodayDateObj())),
         muscle_mass: muscle,
         body_fat_pct: fatPct,
         water: water,
         weight: weight,
         protein: rec.protein !== undefined ? Number(rec.protein) : +(muscle * 0.33).toFixed(1),
         minerals: rec.minerals !== undefined ? Number(rec.minerals) : +(weight * 0.048).toFixed(2),
-        visceral_fat: rec.visceral_fat !== undefined ? Number(rec.visceral_fat) : 5,
-        bmi: rec.bmi !== undefined ? Number(rec.bmi) : +(weight / (1.80 * 1.80)).toFixed(1),
+        visceral_fat: rec.visceral_fat !== undefined ? Number(rec.visceral_fat) : 0,
+        bmi: rec.bmi !== undefined ? Number(rec.bmi) : (weight > 0 ? +(weight / (1.80 * 1.80)).toFixed(1) : 0),
         fat_free_mass: ffm,
-        bmr: rec.bmr !== undefined ? Number(rec.bmr) : Math.round(370 + 21.6 * ffm),
-        seg_left_arm: rec.seg_left_arm !== undefined ? Number(rec.seg_left_arm) : 3.9,
-        seg_right_arm: rec.seg_right_arm !== undefined ? Number(rec.seg_right_arm) : 4.0,
-        seg_torso: rec.seg_torso !== undefined ? Number(rec.seg_torso) : 29.8,
-        seg_left_leg: rec.seg_left_leg !== undefined ? Number(rec.seg_left_leg) : 10.6,
-        seg_right_leg: rec.seg_right_leg !== undefined ? Number(rec.seg_right_leg) : 10.7,
-        optimal_weight: rec.optimal_weight !== undefined ? Number(rec.optimal_weight) : 80.0,
-        calorie_norm: rec.calorie_norm !== undefined ? Number(rec.calorie_norm) : 2550
+        bmr: rec.bmr !== undefined ? Number(rec.bmr) : (ffm > 0 ? Math.round(370 + 21.6 * ffm) : 0),
+        seg_left_arm: rec.seg_left_arm !== undefined ? Number(rec.seg_left_arm) : 0,
+        seg_right_arm: rec.seg_right_arm !== undefined ? Number(rec.seg_right_arm) : 0,
+        seg_torso: rec.seg_torso !== undefined ? Number(rec.seg_torso) : 0,
+        seg_left_leg: rec.seg_left_leg !== undefined ? Number(rec.seg_left_leg) : 0,
+        seg_right_leg: rec.seg_right_leg !== undefined ? Number(rec.seg_right_leg) : 0,
+        optimal_weight: rec.optimal_weight !== undefined ? Number(rec.optimal_weight) : 0,
+        calorie_norm: rec.calorie_norm !== undefined ? Number(rec.calorie_norm) : 0
       };
     }
 
-    function normalizeAnthropometryRecord(rec) {
+    function normalizeAnthropometryRecord(rec = {}) {
       return {
-        date: rec.date || '24.10.2026',
-        chest: Number(rec.chest ?? 100),
-        waist: Number(rec.waist ?? 80),
-        arms: Number(rec.arms ?? rec.biceps ?? 38)
+        date: rec.date || formatDotDate(formatISO(getTodayDateObj())),
+        chest: Number(rec.chest ?? 0),
+        waist: Number(rec.waist ?? 0),
+        arms: Number(rec.arms ?? rec.biceps ?? 0)
       };
     }
 const TELEGRAM_STORAGE_CONFIG = {
@@ -890,8 +1178,8 @@ const TELEGRAM_STORAGE_CONFIG = {
       const file = event.target.files && event.target.files[0];
       if (!file) return;
 
-      const currentStudent = (appData.students || []).find(s => String(s.id) === String(appData.current_student_id));
-      const studentName = currentStudent ? currentStudent.name : 'Подопечный';
+      const currentStudent = getCurrentStudent();
+      const studentName = currentStudent ? (currentStudent.full_name || currentStudent.name || 'Подопечный') : 'Подопечный';
       const studentCode = currentStudent ? currentStudent.access_code : 'N/A';
 
       showToast('Загружаем фото в архив...', 'info');
@@ -924,7 +1212,7 @@ const TELEGRAM_STORAGE_CONFIG = {
       const days = getUpcomingDays(10);
       const scheduleSlots = {};
       days.forEach(dayObj => {
-        scheduleSlots[dayObj.iso] = buildDefaultHoursForDay(9, 21, [13, 17], {});
+        scheduleSlots[dayObj.iso] = buildDefaultHoursForDay(9, 21, [], {});
       });
 
       return {
@@ -985,7 +1273,7 @@ const TELEGRAM_STORAGE_CONFIG = {
       if (!appData.schedule_slots) appData.schedule_slots = {};
       upcoming.forEach(d => {
         if (!appData.schedule_slots[d.iso]) {
-          appData.schedule_slots[d.iso] = buildDefaultHoursForDay(9, 21, [13], {});
+          appData.schedule_slots[d.iso] = buildDefaultHoursForDay(9, 21, [], {});
         }
       });
 
@@ -1047,13 +1335,13 @@ const TELEGRAM_STORAGE_CONFIG = {
     }
 
     function getCurrentStudent() {
-      if (!appData || !appData.students) return null;
-      return appData.students.find(s => s.id === appData.current_student_id) || appData.students[0];
+      if (!appData || !Array.isArray(appData.students) || appData.students.length === 0) return null;
+      return appData.students.find(s => String(s.id) === String(appData.current_student_id) || (s.supabase_id && String(s.supabase_id) === String(appData.current_student_id))) || appData.students[0];
     }
 
     function getStudentById(id) {
-      if (!appData || !appData.students) return null;
-      return appData.students.find(s => s.id === id) || null;
+      if (!appData || !Array.isArray(appData.students) || id === undefined || id === null) return null;
+      return appData.students.find(s => String(s.id) === String(id) || (s.supabase_id && String(s.supabase_id) === String(id)) || (s.access_code && String(s.access_code).toUpperCase() === String(id).toUpperCase())) || null;
     }
 
     // П.2: Персональный пул упражнений ТЕКУЩЕГО подопечного, отсортированный по частоте выполнения
@@ -1132,7 +1420,7 @@ const TELEGRAM_STORAGE_CONFIG = {
             </button>
           </div>
           <p class="text-xs text-[#8B949E] leading-relaxed">
-            Восстановить исходное демонстрационное состояние LocalStorage (тренер Денис, 3 подопечных, мультибронирование, полный InBody и демо-отчёты)?
+            Перезагрузить актуальное состояние из облачной базы данных Supabase?
           </p>
           <div class="flex gap-2 pt-1">
             <button onclick="closeModal()" class="flex-1 py-2.5 rounded-xl bg-[#1F242C] border border-[#30363D] text-xs font-semibold text-white">Отмена</button>
@@ -1142,35 +1430,134 @@ const TELEGRAM_STORAGE_CONFIG = {
       `);
     }
 
-    function confirmResetDemoData() {
+    async function confirmResetDemoData() {
       appData = buildInitialSeedData();
       uiState.reschedulingBookingId = null;
       uiState.onboardingMode = null;
       currentUser = null;
       currentSubscription = null;
-      try {
-        localStorage.removeItem('sv_role');
-        localStorage.removeItem('sv_user');
-      } catch (e) {}
-      saveAppData();
       closeModal();
-      showToast('Демо-данные восстановлены до исходного состояния');
+      await syncAllStudentsFromSupabase();
+      showToast('Состояние синхронизировано с облачной базой');
       renderApp();
+    }
+
+    function saveSessionToTelegramCloud(role, studentId = '', accessCode = '') {
+      try {
+        const cs = window.Telegram?.WebApp?.CloudStorage;
+        if (cs && typeof cs.setItem === 'function') {
+          cs.setItem('sv_role', String(role || ''), () => {});
+          cs.setItem('sv_student_id', String(studentId || ''), () => {});
+          cs.setItem('sv_access_code', String(accessCode || ''), () => {});
+        }
+      } catch (e) {
+        console.warn('CloudStorage setItem fallback:', e);
+      }
+    }
+
+    function clearSessionInTelegramCloud() {
+      try {
+        const cs = window.Telegram?.WebApp?.CloudStorage;
+        if (cs && typeof cs.removeItems === 'function') {
+          cs.removeItems(['sv_role', 'sv_student_id', 'sv_access_code'], () => {});
+        } else if (cs && typeof cs.removeItem === 'function') {
+          cs.removeItem('sv_role', () => {});
+          cs.removeItem('sv_student_id', () => {});
+          cs.removeItem('sv_access_code', () => {});
+        }
+      } catch (e) {
+        console.warn('CloudStorage removeItems fallback:', e);
+      }
+    }
+
+    async function restoreSessionFromTelegram() {
+      try {
+        const cs = window.Telegram?.WebApp?.CloudStorage;
+        if (cs && typeof cs.getItems === 'function') {
+          const stored = await new Promise(resolve => {
+            let settled = false;
+            const timer = setTimeout(() => {
+              if (!settled) {
+                settled = true;
+                resolve(null);
+              }
+            }, 1200);
+            try {
+              cs.getItems(['sv_role', 'sv_student_id', 'sv_access_code'], (err, values) => {
+                if (!settled) {
+                  settled = true;
+                  clearTimeout(timer);
+                  resolve(err ? null : (values || null));
+                }
+              });
+            } catch (e) {
+              if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                resolve(null);
+              }
+            }
+          });
+
+          if (stored && stored.sv_role) {
+            if (stored.sv_role === 'trainer') {
+              appData.current_role = 'trainer';
+              return true;
+            }
+            if (stored.sv_role === 'student') {
+              const targetCode = String(stored.sv_access_code || '').trim().toUpperCase();
+              const targetId = String(stored.sv_student_id || '').trim();
+              const found = (appData.students || []).find(s =>
+                (targetId && String(s.id) === targetId) ||
+                (targetCode && String(s.access_code || '').toUpperCase() === targetCode)
+              );
+              if (found) {
+                appData.current_role = 'student';
+                appData.current_student_id = found.id;
+                await getOrCreateSupabaseUser('student', { autoEnter: true, student: found });
+                return true;
+              }
+            }
+          }
+        }
+
+        const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
+        if (tgUser) {
+          const tgUsername = String(tgUser.username || '').trim().replace(/^@/, '').toLowerCase();
+          const trainerUsername = String(appData?.trainer_profile?.telegram_username || '').trim().replace(/^@/, '').toLowerCase();
+          if (tgUsername && trainerUsername && tgUsername === trainerUsername) {
+            appData.current_role = 'trainer';
+            saveSessionToTelegramCloud('trainer', '', '');
+            return true;
+          }
+
+          const matchedStudent = (appData.students || []).find(s =>
+            (tgUser.id && Number(s.telegram_id) === Number(tgUser.id)) ||
+            (tgUsername && String(s.telegram_username || '').trim().replace(/^@/, '').toLowerCase() === tgUsername)
+          );
+          if (matchedStudent) {
+            appData.current_role = 'student';
+            appData.current_student_id = matchedStudent.id;
+            saveSessionToTelegramCloud('student', matchedStudent.id, matchedStudent.access_code);
+            await getOrCreateSupabaseUser('student', { autoEnter: true, student: matchedStudent });
+            return true;
+          }
+        }
+      } catch (err) {
+        console.warn('Не удалось автоматически восстановить сессию Telegram:', err);
+      }
+      return false;
     }
 
     function switchRolePrompt() {
       triggerHaptic('light');
+      clearSessionInTelegramCloud();
       appData.current_role = null;
       uiState.onboardingMode = null;
       uiState.workoutEditorOpen = false;
       uiState.reschedulingBookingId = null;
-      try {
-        localStorage.removeItem('sv_role');
-        localStorage.removeItem('sv_user');
-      } catch (e) {}
       currentUser = null;
       currentSubscription = null;
-      saveAppData();
       renderApp();
       showToast('Выберите роль и профиль для входа');
     }
@@ -1190,97 +1577,73 @@ const TELEGRAM_STORAGE_CONFIG = {
       }
     }
 
-  function toggleTrainerPinVisibility() {
-  const input = document.getElementById('input-trainer-pin');
-  const icon = document.getElementById('eye-icon-trainer-pin');
-  if (!input) return;
+    function toggleTrainerPinVisibility() {
+      const input = document.getElementById('input-trainer-pin');
+      const icon = document.getElementById('eye-icon-trainer-pin');
+      if (!input) return;
 
-  if (input.type === 'password') {
-    input.type = 'text';
-    if (icon) icon.setAttribute('data-lucide', 'eye-off');
-  } else {
-    input.type = 'password';
-    if (icon) icon.setAttribute('data-lucide', 'eye');
-  }
-  if (window.lucide && typeof lucide.createIcons === 'function') {
-    lucide.createIcons();
-  }
-}
+      if (input.type === 'password') {
+        input.type = 'text';
+        if (icon) icon.setAttribute('data-lucide', 'eye-off');
+      } else {
+        input.type = 'password';
+        if (icon) icon.setAttribute('data-lucide', 'eye');
+      }
+      if (window.lucide && typeof lucide.createIcons === 'function') {
+        lucide.createIcons();
+      }
+    }
 
-async function submitTrainerPin() {
-  const input = document.getElementById('input-trainer-pin');
-  const val = (input ? input.value : '').trim();
-  const expected = (appData.trainer_profile.master_pin || '').trim();
+    async function submitTrainerPin() {
+      const input = document.getElementById('input-trainer-pin');
+      const val = (input ? input.value : '').trim();
+      const expected = (appData.trainer_profile.master_pin || '').trim();
 
-  if (!val) {
-    showToast('Введите пароль тренера', 'error');
-    return;
-  }
+      if (!val) {
+        showToast('Введите пароль тренера', 'error');
+        return;
+      }
 
-  if (val === expected) {
-    triggerHaptic('success');
-    appData.current_role = 'trainer';
-    uiState.onboardingMode = null;
-    try {
-      localStorage.setItem('sv_role', 'trainer');
-    } catch (e) {}
-    saveAppData();
-    renderApp();
-    await getOrCreateSupabaseUser('coach', { autoEnter: true });
-    showToast(`Добро пожаловать, ${appData.trainer_profile.full_name}!`);
-  } else {
-    showToast('Неверный пароль тренера', 'error');
-  }
-}
-
+      if (val === expected) {
+        triggerHaptic('success');
+        appData.current_role = 'trainer';
+        uiState.onboardingMode = null;
+        saveSessionToTelegramCloud('trainer', '', '');
+        await syncAllStudentsFromSupabase();
+        renderApp();
+        showToast(`Добро пожаловать, ${appData.trainer_profile.full_name}!`);
+      } else {
+        showToast('Неверный пароль тренера', 'error');
+      }
+    }
 
     async function submitStudentCode() {
-  const input = document.getElementById('input-student-code');
-  const val = (input ? input.value : '').trim().toUpperCase();
+      const input = document.getElementById('input-student-code');
+      const val = (input ? input.value : '').trim().toUpperCase();
 
-  if (!val) {
-    showToast('Введите персональный код доступа', 'error');
-    return;
-  }
-
-  let found = (appData.students || []).find(s => (s.access_code || s.code || '').toUpperCase() === val);
-
-  if (!found && typeof supabaseClient !== 'undefined' && supabaseClient) {
-    try {
-      const { data, error } = await supabaseClient
-        .from('students')
-        .select('*')
-        .or(`access_code.ilike.${val},code.ilike.${val},invite_code.ilike.${val}`)
-        .maybeSingle();
-
-      if (!error && data) {
-        found = data;
-        if (!appData.students) appData.students = [];
-        appData.students.push(found);
+      if (!val) {
+        showToast('Введите персональный код доступа', 'error');
+        return;
       }
-    } catch (err) {
-      console.warn('Ошибка запроса студента из Supabase:', err);
-    }
-  }
 
-  if (found) {
-    triggerHaptic('success');
-    appData.current_role = 'student';
-    appData.current_student_id = found.id;
-    uiState.onboardingMode = null;
-    try {
-      localStorage.setItem('sv_role', 'student');
-      localStorage.setItem('sv_student_id', String(found.id));
-    } catch (e) {}
-    saveAppData();
-    renderApp();
-    await getOrCreateSupabaseUser('student', { autoEnter: true, student: found });
-    const activeSt = getCurrentStudent() || found;
-    showToast(`Привет, ${activeSt.full_name || activeSt.name}! С возвращением в Step Value.`);
-  } else {
-    showToast('Код подопечного не найден. Проверьте правильность кода.', 'error');
-  }
-}
+      await syncAllStudentsFromSupabase();
+
+      let found = (appData.students || []).find(s => (s.access_code || s.code || '').toUpperCase() === val);
+
+      if (found) {
+        triggerHaptic('success');
+        appData.current_role = 'student';
+        appData.current_student_id = found.id;
+        uiState.onboardingMode = null;
+        await getOrCreateSupabaseUser('student', { autoEnter: true, student: found });
+        const activeSt = getCurrentStudent() || found;
+        saveSessionToTelegramCloud('student', activeSt.id, activeSt.access_code);
+        renderApp();
+        showToast(`Привет, ${activeSt.full_name || activeSt.name}! С возвращением в Step Value.`);
+      } else {
+        showToast('Код подопечного не найден. Проверьте правильность кода.', 'error');
+      }
+    }
 
 function renderOnboardingScreen() {
       return `
@@ -1421,14 +1784,14 @@ function renderOnboardingScreen() {
         const startIdx = daySlots.findIndex(s => s.time === time);
         if (startIdx !== -1) {
           for (let k = 0; k < hoursNeeded; k++) {
-            if (daySlots[startIdx + k] && daySlots[startIdx + k].booked_by === student.id) {
+            if (daySlots[startIdx + k] && String(daySlots[startIdx + k].booked_by) === String(student.id)) {
               daySlots[startIdx + k].booked_by = null;
               daySlots[startIdx + k].is_open = true;
             }
           }
         } else {
           daySlots.forEach(s => {
-            if (s.booked_by === student.id) {
+            if (String(s.booked_by) === String(student.id)) {
               s.booked_by = null;
               s.is_open = true;
             }
@@ -1495,8 +1858,7 @@ function renderOnboardingScreen() {
           // 4. Синхронизируем изменение в Supabase (БЕЗ списания used_sessions!)
           try {
             if (typeof supabaseClient !== 'undefined' && supabaseClient) {
-              const userRaw = localStorage.getItem('sv_user');
-              const user = userRaw ? JSON.parse(userRaw) : currentUser;
+              const targetStudentId = student.supabase_id || student.id || (currentUser && currentUser.id);
 
               if (existingToReschedule.id && !String(existingToReschedule.id).startsWith('bk-')) {
                 await supabaseClient
@@ -1508,11 +1870,11 @@ function renderOnboardingScreen() {
                     status: 'confirmed'
                   })
                   .eq('id', existingToReschedule.id);
-              } else if (user && user.id) {
+              } else if (targetStudentId) {
                 const { data: newBk } = await supabaseClient
                   .from('bookings')
                   .insert([{
-                    student_id: user.id,
+                    student_id: targetStudentId,
                     session_date: isoDate,
                     session_time: startTime,
                     duration_minutes: sessionDuration,
@@ -1528,6 +1890,7 @@ function renderOnboardingScreen() {
             console.warn('Ошибка синхронизации переноса с Supabase:', err);
           }
 
+          await persistScheduleSlotsToSupabase();
           saveAppData();
           triggerHaptic('success');
           showToast(`Запись перенесена на ${formatHumanDate(isoDate)} в ${startTime}. Баланс сохранён: ${student.subscription.remaining} из ${student.subscription.total}!`);
@@ -1551,10 +1914,10 @@ function renderOnboardingScreen() {
 
         // Обновляем локальное состояние абонемента строго по ответу Supabase
         const sub = result.sub;
-        const total = Number(sub.total_sessions) || activeStudent.subscription.total || 12;
-        const used = Number(sub.used_sessions) || 0;
+        const total = Math.max(0, Number(sub.total_sessions ?? activeStudent.subscription?.total ?? 0) || 0);
+        const used = Math.max(0, Number(sub.used_sessions) || 0);
         const remaining = Math.max(0, total - used);
-        const sessionDuration = Number(sub.session_duration_minutes) || activeStudent.session_duration || 120;
+        const sessionDuration = Number(sub.session_duration_minutes) || activeStudent.session_duration || 60;
 
         activeStudent.session_duration = sessionDuration;
         activeStudent.subscription.id = sub.id;
@@ -1586,6 +1949,7 @@ function renderOnboardingScreen() {
 
         activeStudent.active_bookings.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
 
+        await persistScheduleSlotsToSupabase();
         saveAppData();
         triggerHaptic('success');
         showToast(`Тренировка забронирована на ${formatHumanDate(isoDate)} в ${startTime}! Остаток: ${remaining} из ${total}`);
@@ -1610,39 +1974,23 @@ function renderOnboardingScreen() {
 
   // 2. ВОЗВРАЩАЕМ ЗАНЯТИЕ НА БАЛАНС В UI
   if (student.subscription) {
-    student.subscription.remaining = Math.min(
-      student.subscription.total,
-      (student.subscription.remaining || 0) + 1
-    );
+    const total = Math.max(0, Number(student.subscription.total) || 0);
+    const used = Math.max(0, (Number(student.subscription.used) || 0) - 1);
+    student.subscription.used = used;
+    student.subscription.used_sessions = used;
+    student.subscription.remaining = Math.max(0, total - used);
   }
 
   // 3. Синхронизируем возврат с Supabase
   try {
     if (typeof supabaseClient !== 'undefined' && supabaseClient) {
-      // Удаляем из таблицы bookings
       await supabaseClient
         .from('bookings')
         .delete()
         .eq('id', bookingId);
 
-      // Уменьшаем used_sessions в subscriptions
-      const userRaw = localStorage.getItem('sv_user');
-      if (userRaw) {
-        const user = JSON.parse(userRaw);
-        const { data: sub } = await supabaseClient
-          .from('subscriptions')
-          .select('*')
-          .eq('student_id', user.id)
-          .eq('status', 'active')
-          .maybeSingle();
-
-        if (sub && sub.used_sessions > 0) {
-          await supabaseClient
-            .from('subscriptions')
-            .update({ used_sessions: sub.used_sessions - 1 })
-            .eq('id', sub.id);
-        }
-      }
+      await persistStudentToSupabase(student);
+      await persistScheduleSlotsToSupabase();
     }
   } catch (err) {
     console.warn("Ошибка синхронизации отмены с Supabase:", err);
@@ -1705,10 +2053,10 @@ function renderOnboardingScreen() {
               </span>
             </div>
             ${(() => {
-                const total = Number(sub.total_sessions || sub.total || 12);
+                const total = Math.max(0, Number(sub.total_sessions ?? sub.total ?? 0) || 0);
                 const activeCount = Array.isArray(student.active_bookings) ? student.active_bookings.length : 0;
                 const rem = Math.max(0, Math.min(total, Number(sub.remaining !== undefined ? sub.remaining : (total - activeCount))));
-                const percent = Math.min(100, Math.round((rem / total) * 100));
+                const percent = total > 0 ? Math.min(100, Math.round((rem / total) * 100)) : 0;
                 return `
                 <div class="flex items-baseline justify-between mb-2.5">
                   <h2 class="text-lg font-extrabold text-white">
@@ -1746,7 +2094,7 @@ function renderOnboardingScreen() {
                   <span>Ссылка активна только сегодня (до 23:59)</span>
                 </span>
               </div>
-              <a href="${sub.robokassa_url}" target="_blank" rel="noopener noreferrer" onclick="triggerHaptic('success')" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-neon hover:brightness-110 transition">
+              <a href="${sub.robokassa_url || '#'}" ${sub.robokassa_url ? 'target="_blank" rel="noopener noreferrer"' : ''} onclick="if(!'${sub.robokassa_url || ''}'){event.preventDefault();showToast('Ссылка на оплату ещё не указана тренером','error');return false;}triggerHaptic('success')" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-neon hover:brightness-110 transition">
                 <span>💳 ОПЛАТИТЬ АБОНЕМЕНТ</span>
               </a>
             </div>
@@ -2032,13 +2380,13 @@ function renderOnboardingScreen() {
         student.workouts.push(savedObj);
       }
 
-      saveAppData();
+      persistStudentToSupabase(student);
       refreshStudentExercisesDatalist();
       uiState.workoutEditorOpen = false;
       uiState.editingWorkoutId = null;
       uiState.draftWorkout = null;
       triggerHaptic('success');
-      showToast('Тренировка сохранена! Новые упражнения добавлены в ваш персональный пул подсказок.');
+      showToast('Тренировка сохранена в облаке! Новые упражнения добавлены в ваш пул подсказок.');
       renderApp();
     }
 
@@ -2112,7 +2460,7 @@ function renderOnboardingScreen() {
                     </div>
                     <div>
                       <label class="block text-[10px] text-[#8B949E] mb-1">Вес (кг)</label>
-                      <input id="ex-weight-${idx}" type="number" step="0.5" min="0" value="${ex.weight}" placeholder="0" class="w-full bg-[#090C10] border border-[#30363D] rounded-lg px-2.5 py-1.5 text-xs font-extrabold text-[#00E676] text-center outline-none focus:border-[#00E676]" />
+                      <input id="ex-weight-${idx}" type="number" step="0.5" min="0" value="${ex.weight !== 0 && ex.weight !== '0' ? ex.weight : ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-lg px-2.5 py-1.5 text-xs font-extrabold text-[#00E676] text-center outline-none focus:border-[#00E676]" />
                     </div>
                     <button type="button" onclick="toggleExerciseVideoField(${idx})" class="py-1.5 px-2 rounded-lg border ${ex.video_url || ex.show_video_input ? 'bg-[#10B981]/20 border-[#00E676] text-[#00E676]' : 'bg-[#0D1117] border-[#30363D] text-[#8B949E]'} text-[11px] font-bold flex items-center justify-center gap-1 h-[34px] transition">
                       <span>📎 Видео</span>
@@ -2238,7 +2586,7 @@ function renderOnboardingScreen() {
     // П.9: Полный срез DDX InBody — модалка внесения замера со всеми полями
     function submitInBodyScanModal() {
       const student = getCurrentStudent();
-      const latest = (student.inbody && student.inbody[student.inbody.length - 1]) || enrichInBodyRecord({});
+      const latest = (student && student.inbody && student.inbody[student.inbody.length - 1]) || enrichInBodyRecord({});
 
       openModal(`
         <div class="space-y-3.5">
@@ -2251,51 +2599,51 @@ function renderOnboardingScreen() {
           <div class="grid grid-cols-2 gap-2">
             <div>
               <label class="block text-[10px] text-[#8B949E] mb-1">Вес (кг)</label>
-              <input id="inbody-weight" type="number" step="0.1" value="${latest.weight}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
+              <input id="inbody-weight" type="number" step="0.1" value="${latest.weight || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
             </div>
             <div>
               <label class="block text-[10px] text-[#8B949E] mb-1">Мышцы SMM (кг)</label>
-              <input id="inbody-muscle" type="number" step="0.1" value="${latest.muscle_mass}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-[#00E676]" />
+              <input id="inbody-muscle" type="number" step="0.1" value="${latest.muscle_mass || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-[#00E676]" />
             </div>
             <div>
               <label class="block text-[10px] text-[#8B949E] mb-1">Жир PBF (%)</label>
-              <input id="inbody-fat" type="number" step="0.1" value="${latest.body_fat_pct}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
+              <input id="inbody-fat" type="number" step="0.1" value="${latest.body_fat_pct || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
             </div>
             <div>
               <label class="block text-[10px] text-[#8B949E] mb-1">Вода TBW (л)</label>
-              <input id="inbody-water" type="number" step="0.1" value="${latest.water}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
+              <input id="inbody-water" type="number" step="0.1" value="${latest.water || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
             </div>
             <div>
               <label class="block text-[10px] text-[#8B949E] mb-1">Белок (кг)</label>
-              <input id="inbody-protein" type="number" step="0.1" value="${latest.protein}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
+              <input id="inbody-protein" type="number" step="0.1" value="${latest.protein || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
             </div>
             <div>
               <label class="block text-[10px] text-[#8B949E] mb-1">Минералы (кг)</label>
-              <input id="inbody-minerals" type="number" step="0.05" value="${latest.minerals}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
+              <input id="inbody-minerals" type="number" step="0.05" value="${latest.minerals || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
             </div>
             <div>
               <label class="block text-[10px] text-[#8B949E] mb-1">Висцеральный жир (ур.)</label>
-              <input id="inbody-visceral" type="number" step="1" value="${latest.visceral_fat}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
+              <input id="inbody-visceral" type="number" step="1" value="${latest.visceral_fat || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
             </div>
             <div>
               <label class="block text-[10px] text-[#8B949E] mb-1">ИМТ (кг/м²)</label>
-              <input id="inbody-bmi" type="number" step="0.1" value="${latest.bmi}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
+              <input id="inbody-bmi" type="number" step="0.1" value="${latest.bmi || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
             </div>
             <div>
               <label class="block text-[10px] text-[#8B949E] mb-1">Безжировая масса FFM (кг)</label>
-              <input id="inbody-ffm" type="number" step="0.1" value="${latest.fat_free_mass}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
+              <input id="inbody-ffm" type="number" step="0.1" value="${latest.fat_free_mass || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
             </div>
             <div>
               <label class="block text-[10px] text-[#8B949E] mb-1">Базовый метаболизм BMR (ккал)</label>
-              <input id="inbody-bmr" type="number" step="10" value="${latest.bmr}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
+              <input id="inbody-bmr" type="number" step="10" value="${latest.bmr || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-white" />
             </div>
             <div>
               <label class="block text-[10px] text-[#8B949E] mb-1">Оптимальный вес (кг)</label>
-              <input id="inbody-opt-weight" type="number" step="0.5" value="${latest.optimal_weight}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-[#00E676]" />
+              <input id="inbody-opt-weight" type="number" step="0.5" value="${latest.optimal_weight || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-[#00E676]" />
             </div>
             <div>
               <label class="block text-[10px] text-[#8B949E] mb-1">Норма калорий (ккал)</label>
-              <input id="inbody-cal-norm" type="number" step="20" value="${latest.calorie_norm}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-[#00E676]" />
+              <input id="inbody-cal-norm" type="number" step="20" value="${latest.calorie_norm || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-1.5 text-xs font-bold text-[#00E676]" />
             </div>
           </div>
 
@@ -2304,23 +2652,23 @@ function renderOnboardingScreen() {
             <div class="grid grid-cols-3 gap-2">
               <div>
                 <label class="block text-[10px] text-[#8B949E] mb-1">Лев. рука</label>
-                <input id="inbody-seg-la" type="number" step="0.1" value="${latest.seg_left_arm}" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2 py-1 text-xs font-bold text-white" />
+                <input id="inbody-seg-la" type="number" step="0.1" value="${latest.seg_left_arm || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2 py-1 text-xs font-bold text-white" />
               </div>
               <div>
                 <label class="block text-[10px] text-[#8B949E] mb-1">Прав. рука</label>
-                <input id="inbody-seg-ra" type="number" step="0.1" value="${latest.seg_right_arm}" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2 py-1 text-xs font-bold text-white" />
+                <input id="inbody-seg-ra" type="number" step="0.1" value="${latest.seg_right_arm || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2 py-1 text-xs font-bold text-white" />
               </div>
               <div>
                 <label class="block text-[10px] text-[#8B949E] mb-1">Торс</label>
-                <input id="inbody-seg-tr" type="number" step="0.1" value="${latest.seg_torso}" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2 py-1 text-xs font-bold text-white" />
+                <input id="inbody-seg-tr" type="number" step="0.1" value="${latest.seg_torso || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2 py-1 text-xs font-bold text-white" />
               </div>
               <div>
                 <label class="block text-[10px] text-[#8B949E] mb-1">Лев. нога</label>
-                <input id="inbody-seg-ll" type="number" step="0.1" value="${latest.seg_left_leg}" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2 py-1 text-xs font-bold text-white" />
+                <input id="inbody-seg-ll" type="number" step="0.1" value="${latest.seg_left_leg || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2 py-1 text-xs font-bold text-white" />
               </div>
               <div>
                 <label class="block text-[10px] text-[#8B949E] mb-1">Прав. нога</label>
-                <input id="inbody-seg-rl" type="number" step="0.1" value="${latest.seg_right_leg}" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2 py-1 text-xs font-bold text-white" />
+                <input id="inbody-seg-rl" type="number" step="0.1" value="${latest.seg_right_leg || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2 py-1 text-xs font-bold text-white" />
               </div>
             </div>
           </div>
@@ -2336,30 +2684,30 @@ function renderOnboardingScreen() {
       const student = getCurrentStudent();
       const record = enrichInBodyRecord({
         date: formatDotDate(formatISO(getTodayDateObj())),
-        weight: parseFloat(document.getElementById('inbody-weight').value) || 81.2,
-        muscle_mass: parseFloat(document.getElementById('inbody-muscle').value) || 38.9,
-        body_fat_pct: parseFloat(document.getElementById('inbody-fat').value) || 13.6,
-        water: parseFloat(document.getElementById('inbody-water').value) || 50.1,
-        protein: parseFloat(document.getElementById('inbody-protein').value) || 13.5,
-        minerals: parseFloat(document.getElementById('inbody-minerals').value) || 4.3,
-        visceral_fat: parseInt(document.getElementById('inbody-visceral').value, 10) || 5,
-        bmi: parseFloat(document.getElementById('inbody-bmi').value) || 25.0,
-        fat_free_mass: parseFloat(document.getElementById('inbody-ffm').value) || 70.2,
-        bmr: parseInt(document.getElementById('inbody-bmr').value, 10) || 1890,
-        optimal_weight: parseFloat(document.getElementById('inbody-opt-weight').value) || 80.0,
-        calorie_norm: parseInt(document.getElementById('inbody-cal-norm').value, 10) || 2550,
-        seg_left_arm: parseFloat(document.getElementById('inbody-seg-la').value) || 3.9,
-        seg_right_arm: parseFloat(document.getElementById('inbody-seg-ra').value) || 4.0,
-        seg_torso: parseFloat(document.getElementById('inbody-seg-tr').value) || 29.8,
-        seg_left_leg: parseFloat(document.getElementById('inbody-seg-ll').value) || 10.6,
-        seg_right_leg: parseFloat(document.getElementById('inbody-seg-rl').value) || 10.7
+        weight: parseFloat(document.getElementById('inbody-weight').value) || 0,
+        muscle_mass: parseFloat(document.getElementById('inbody-muscle').value) || 0,
+        body_fat_pct: parseFloat(document.getElementById('inbody-fat').value) || 0,
+        water: parseFloat(document.getElementById('inbody-water').value) || 0,
+        protein: parseFloat(document.getElementById('inbody-protein').value) || 0,
+        minerals: parseFloat(document.getElementById('inbody-minerals').value) || 0,
+        visceral_fat: parseInt(document.getElementById('inbody-visceral').value, 10) || 0,
+        bmi: parseFloat(document.getElementById('inbody-bmi').value) || 0,
+        fat_free_mass: parseFloat(document.getElementById('inbody-ffm').value) || 0,
+        bmr: parseInt(document.getElementById('inbody-bmr').value, 10) || 0,
+        optimal_weight: parseFloat(document.getElementById('inbody-opt-weight').value) || 0,
+        calorie_norm: parseInt(document.getElementById('inbody-cal-norm').value, 10) || 0,
+        seg_left_arm: parseFloat(document.getElementById('inbody-seg-la').value) || 0,
+        seg_right_arm: parseFloat(document.getElementById('inbody-seg-ra').value) || 0,
+        seg_torso: parseFloat(document.getElementById('inbody-seg-tr').value) || 0,
+        seg_left_leg: parseFloat(document.getElementById('inbody-seg-ll').value) || 0,
+        seg_right_leg: parseFloat(document.getElementById('inbody-seg-rl').value) || 0
       });
 
       student.inbody.push(record);
-      saveAppData();
+      persistStudentToSupabase(student);
       closeModal();
       triggerHaptic('success');
-      showToast('Полный скан DDX InBody добавлен!');
+      showToast('Полный скан DDX InBody сохранён в базе!');
       renderApp();
     }
 
@@ -2491,24 +2839,46 @@ function renderOnboardingScreen() {
       });
     }
 
+    function getCurrentMonthYearLabel() {
+      const d = getTodayDateObj();
+      const monthsNom = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+      return `${monthsNom[d.getMonth()]} ${d.getFullYear()}`;
+    }
+
+    function createDefaultPhotoReportSlice(label) {
+      const sliceLabel = label || getCurrentMonthYearLabel();
+      return {
+        date: sliceLabel,
+        front_url: createSilhouetteDataUri(sliceLabel, 'СПЕРЕДИ', 10, 0, '#00E676'),
+        side_url: createSilhouetteDataUri(sliceLabel, 'СБОКУ', 10, 0, '#00E676'),
+        back_url: createSilhouetteDataUri(sliceLabel, 'СЗАДИ', 10, 0, '#00E676'),
+        front_custom: false,
+        side_custom: false,
+        back_custom: false
+      };
+    }
+
     async function handlePhotoFileChange(event) {
       const file = event.target.files && event.target.files[0];
       if (!file || !uiState.pendingPhotoSlotKey) return;
       try {
         const compressedDataUrl = await compressImageFileToDataUrl(file, 1280, 0.75);
         const student = getCurrentStudent();
+        if (!student) return;
+        if (!Array.isArray(student.photo_reports) || student.photo_reports.length === 0) {
+          student.photo_reports = [createDefaultPhotoReportSlice()];
+        }
         const latestReport = student.photo_reports[student.photo_reports.length - 1];
-        if (!latestReport) return;
 
         const key = uiState.pendingPhotoSlotKey;
         const customFlagKey = key.replace('_url', '_custom');
         latestReport[key] = compressedDataUrl;
         latestReport[customFlagKey] = true;
 
-        saveAppData();
-        triggerHaptic('success');
-        showToast(`Фото «${uiState.pendingPhotoSlotTitle}» сжато (JPEG 0.75) и сохранено!`);
         renderApp();
+        await persistStudentToSupabase(student);
+        triggerHaptic('success');
+        showToast(`Фото «${uiState.pendingPhotoSlotTitle}» сжато (JPEG 0.75) и сохранено в облаке!`);
       } catch (err) {
         showToast('Не удалось обработать изображение', 'error');
       }
@@ -2519,8 +2889,11 @@ function renderOnboardingScreen() {
       const student = appData.current_role === 'trainer'
         ? getStudentById(uiState.selectedTrainerStudentId)
         : getCurrentStudent();
-      if (!student || !student.photo_reports.length) return;
-      const latest = student.photo_reports[student.photo_reports.length - 1];
+      if (!student) return;
+      const reports = Array.isArray(student.photo_reports) && student.photo_reports.length > 0
+        ? student.photo_reports
+        : [createDefaultPhotoReportSlice()];
+      const latest = reports[reports.length - 1];
       const src = latest[angleKey];
       openModal(`
         <div class="space-y-3">
@@ -2535,37 +2908,31 @@ function renderOnboardingScreen() {
       `);
     }
 
-    function deleteStudentPhotoSlot(angleKey, angleTitle) {
+    async function deleteStudentPhotoSlot(angleKey, angleTitle) {
       triggerHaptic('warning');
       const student = getCurrentStudent();
+      if (!student || !Array.isArray(student.photo_reports) || student.photo_reports.length === 0) return;
       const latestReport = student.photo_reports[student.photo_reports.length - 1];
-      if (!latestReport) return;
       const customFlagKey = angleKey.replace('_url', '_custom');
       latestReport[angleKey] = createSilhouetteDataUri(latestReport.date, angleTitle.toUpperCase(), 10, 0, '#00E676');
       latestReport[customFlagKey] = false;
-      saveAppData();
-      showToast(`Фото «${angleTitle}» удалено, восстановлен базовый силуэт`);
       renderApp();
+      await persistStudentToSupabase(student);
+      showToast(`Фото «${angleTitle}» удалено, восстановлен базовый силуэт`);
     }
 
-    function addNewMonthlyPhotoSlice() {
+    async function addNewMonthlyPhotoSlice() {
       const student = getCurrentStudent();
-      const label = 'Ноябрь 2026';
-      student.photo_reports.push({
-        date: label,
-        front_url: createSilhouetteDataUri(label, 'СПЕРЕДИ', 14, -2, '#00E676'),
-        side_url: createSilhouetteDataUri(label, 'СБОКУ', 12, -1, '#00E676'),
-        back_url: createSilhouetteDataUri(label, 'СЗАДИ', 15, -2, '#00E676'),
-        front_custom: false,
-        side_custom: false,
-        back_custom: false
-      });
+      if (!student) return;
+      if (!Array.isArray(student.photo_reports)) student.photo_reports = [];
+      const label = getCurrentMonthYearLabel();
+      student.photo_reports.push(createDefaultPhotoReportSlice(label));
       uiState.photoCompareIdxA = 0;
       uiState.photoCompareIdxB = student.photo_reports.length - 1;
-      saveAppData();
+      renderApp();
+      await persistStudentToSupabase(student);
       triggerHaptic('success');
       showToast('Новый ежемесячный фотоотчёт (3 ракурса) создан!');
-      renderApp();
     }
 
     function updatePhotoCompareControl(field, val) {
@@ -2602,9 +2969,9 @@ function renderOnboardingScreen() {
       const parsedWorkouts = dEl ? parseInt(dEl.value, 10) : NaN;
       const record = {
         date: formatDotDate(formatISO(getTodayDateObj())),
-        fasting_weight: !isNaN(parsedWeight) ? parsedWeight : 81.0,
-        workouts_done: !isNaN(parsedWorkouts) ? parsedWorkouts : 4,
-        weights_growth: (gEl && gEl.value.trim()) ? gEl.value.trim() : 'Рабочие веса растут по плану',
+        fasting_weight: !isNaN(parsedWeight) ? parsedWeight : 0,
+        workouts_done: !isNaN(parsedWorkouts) ? parsedWorkouts : 0,
+        weights_growth: (gEl && gEl.value.trim()) ? gEl.value.trim() : '',
         sleep: sEl && !isNaN(parseInt(sEl.value, 10)) ? parseInt(sEl.value, 10) : 8,
         appetite: aEl && !isNaN(parseInt(aEl.value, 10)) ? parseInt(aEl.value, 10) : 9,
         diet: dtEl && !isNaN(parseInt(dtEl.value, 10)) ? parseInt(dtEl.value, 10) : 9,
@@ -2613,9 +2980,9 @@ function renderOnboardingScreen() {
       };
 
       student.checkups.push(record);
-      saveAppData();
+      persistStudentToSupabase(student);
       triggerHaptic('success');
-      showToast('Еженедельный чек-ап отправлен тренеру!');
+      showToast('Еженедельный чек-ап сохранён и отправлен тренеру!');
       renderApp();
     }
 
@@ -2679,7 +3046,7 @@ function renderOnboardingScreen() {
 
     function renderWeeklyCheckupScreen(student) {
       const checkups = [...(student.checkups || [])].reverse();
-      const latest = checkups[0] || { fasting_weight: 81.4, workouts_done: 4, weights_growth: '', sleep: 8, appetite: 9, diet: 9, digestion: 8, comment: '' };
+      const latest = checkups[0] || { fasting_weight: 0, workouts_done: 0, weights_growth: '', sleep: 8, appetite: 8, diet: 8, digestion: 8, comment: '' };
 
       return `
         <div class="space-y-4 animate-fade">
@@ -2696,11 +3063,11 @@ function renderOnboardingScreen() {
             <div class="grid grid-cols-2 gap-3">
               <div>
                 <label class="block text-[11px] text-[#8B949E] mb-1">Вес утром натощак (кг)</label>
-                <input id="chk-weight" type="number" step="0.1" value="${latest.fasting_weight}" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-sm font-bold text-white outline-none" />
+                <input id="chk-weight" type="number" step="0.1" value="${latest.fasting_weight || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-sm font-bold text-white outline-none" />
               </div>
               <div>
                 <label class="block text-[11px] text-[#8B949E] mb-1">Тренировок за неделю</label>
-                <input id="chk-workouts" type="number" min="0" max="14" value="${latest.workouts_done}" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-sm font-bold text-white outline-none" />
+                <input id="chk-workouts" type="number" min="0" max="14" value="${latest.workouts_done || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-sm font-bold text-white outline-none" />
               </div>
             </div>
 
@@ -2882,8 +3249,10 @@ function renderOnboardingScreen() {
       }
 
       if (sub === 'photos') {
-        const reports = student.photo_reports || [];
-        const latest = reports[reports.length - 1] || { date: 'Октябрь 2026', front_url: '', side_url: '', back_url: '' };
+        const reports = (Array.isArray(student.photo_reports) && student.photo_reports.length > 0)
+          ? student.photo_reports
+          : [createDefaultPhotoReportSlice()];
+        const latest = reports[reports.length - 1];
 
         const slotsMeta = [
           { key: 'front_url', customKey: 'front_custom', label: 'Спереди' },
@@ -3032,21 +3401,98 @@ function renderOnboardingScreen() {
     }
     const renderReportsTab = renderStudentReportsTab;
 
-    function updateStudentPaymentDay(studentIdOrDayVal, maybeDayVal) {
+    function syncTrainerManagementDraftFromDOM(st) {
+      if (!st) return;
+      if (!st.subscription) st.subscription = {};
+
+      const packEl = document.getElementById('tr-mgmt-total-pack');
+      const dayEl = document.getElementById('tr-mgmt-payment-day');
+      const tgEl = document.getElementById('tr-mgmt-tg-username');
+      const sumEl = document.getElementById('tr-mgmt-robokassa-sum');
+      const urlEl = document.getElementById('tr-mgmt-robokassa-url');
+      const notesEl = document.getElementById('tr-mgmt-private-notes');
+
+      if (packEl) {
+        const rawPack = packEl.value.trim();
+        const newTotal = rawPack === '' ? 0 : Math.max(0, parseInt(rawPack, 10) || 0);
+        const currentUsed = Math.min(newTotal, Math.max(0, Number(st.subscription.used_sessions ?? st.subscription.used) || 0));
+        st.subscription.total = newTotal;
+        st.subscription.total_sessions = newTotal;
+        st.subscription.used = currentUsed;
+        st.subscription.used_sessions = currentUsed;
+        st.subscription.remaining = Math.max(0, newTotal - currentUsed);
+      }
+      if (dayEl && dayEl.value !== '') {
+        const newDay = Math.min(28, Math.max(1, parseInt(dayEl.value, 10) || 1));
+        st.subscription.payment_day = newDay;
+        st.subscription.billing_day = newDay;
+      }
+      if (tgEl) {
+        st.telegram_username = tgEl.value.trim().replace(/^@/, '');
+      }
+      if (sumEl) {
+        const rawSumStr = sumEl.value.trim();
+        const rawNum = rawSumStr === '' ? 0 : Math.max(0, parseInt(rawSumStr, 10) || 0);
+        st.subscription.robokassa_sum = formatRublesFromNumber(rawNum);
+      }
+      if (urlEl) {
+        let updatedUrl = urlEl.value.trim();
+        const rawNum = parseNumericRubles(st.subscription.robokassa_sum);
+        if (updatedUrl && /OutSum=\d+/i.test(updatedUrl)) {
+          updatedUrl = updatedUrl.replace(/OutSum=\d+/i, 'OutSum=' + rawNum);
+        }
+        st.subscription.robokassa_url = updatedUrl;
+      }
+      if (notesEl) {
+        st.trainer_private_notes = notesEl.value.trim();
+      }
+    }
+
+    async function updateStudentPaymentDay(studentIdOrDayVal, maybeDayVal) {
       const targetStudent = maybeDayVal !== undefined
         ? getStudentById(studentIdOrDayVal)
         : getCurrentStudent();
       if (!targetStudent) return;
+
       const rawDay = maybeDayVal !== undefined ? maybeDayVal : studentIdOrDayVal;
-      targetStudent.subscription.payment_day = Math.min(28, Math.max(1, parseInt(rawDay, 10) || 4));
-      saveAppData();
+      const newDay = Math.min(28, Math.max(1, Number(rawDay) || 1));
+      if (!targetStudent.subscription) targetStudent.subscription = {};
+      targetStudent.subscription.payment_day = newDay;
+      targetStudent.subscription.billing_day = newDay;
+
+      const selectEl = document.getElementById('tr-mgmt-payment-day');
+      if (selectEl) selectEl.value = String(newDay);
+      const badgeEl = document.getElementById('tr-mgmt-payment-day-badge');
+      if (badgeEl) badgeEl.textContent = `${newDay}-е число`;
+
+      const targetUserId = targetStudent.supabase_id || targetStudent.id;
+      if (supabaseClient && targetUserId && !String(targetUserId).startsWith('step-')) {
+        try {
+          if (targetStudent.subscription.id) {
+            await supabaseClient
+              .from('subscriptions')
+              .update({ billing_day: Number(newDay) || 1 })
+              .eq('id', targetStudent.subscription.id);
+          } else {
+            await supabaseClient
+              .from('subscriptions')
+              .update({ billing_day: Number(newDay) || 1 })
+              .eq('student_id', targetUserId)
+              .eq('status', 'active');
+          }
+        } catch (err) {
+          console.warn('Ошибка точечного обновления billing_day в subscriptions:', err);
+        }
+      }
+
+      await persistStudentToSupabase(targetStudent);
       triggerHaptic('light');
-      showToast(`День выставления счёта изменён на ${targetStudent.subscription.payment_day}-е число месяца`);
-      renderApp();
+      showToast(`День выставления счёта сохранён в базе: ${newDay}-е число месяца`);
     }
 
-    function toggleStudentFreezeStatus() {
+    async function toggleStudentFreezeStatus() {
       const student = getCurrentStudent();
+      if (!student) return;
       const fromEl = document.getElementById('freeze-from');
       const toEl = document.getElementById('freeze-to');
       if (fromEl) student.freeze_details.from = fromEl.value;
@@ -3054,43 +3500,47 @@ function renderOnboardingScreen() {
 
       student.freeze_details.is_frozen = !student.freeze_details.is_frozen;
       student.status = student.freeze_details.is_frozen ? 'frozen' : 'active';
-      saveAppData();
+      renderApp();
+      await persistStudentToSupabase(student);
       triggerHaptic('success');
       showToast(student.freeze_details.is_frozen
         ? `Режим заморозки включён до ${formatDotDate(student.freeze_details.to)}`
         : 'Заморозка снята! Статус «Активен» восстановлен.');
-      renderApp();
     }
 
-    function updateFreezeDates() {
+    async function updateFreezeDates() {
       const student = getCurrentStudent();
+      if (!student) return;
       const fromEl = document.getElementById('freeze-from');
       const toEl = document.getElementById('freeze-to');
       if (fromEl) student.freeze_details.from = fromEl.value;
       if (toEl) student.freeze_details.to = toEl.value;
-      saveAppData();
-      showToast('Даты отпуска/заморозки обновлены');
       renderApp();
+      await persistStudentToSupabase(student);
+      showToast('Даты отпуска/заморозки сохранены в базе');
     }
 
-    function saveStudentMedicalNotes() {
+    async function saveStudentMedicalNotes() {
       const student = getCurrentStudent();
+      if (!student) return;
       const el = document.getElementById('student-medical-notes');
       if (el) {
         student.medical_notes = el.value.trim();
-        saveAppData();
+        await persistStudentToSupabase(student);
         triggerHaptic('success');
-        showToast('Медкарта и ограничения сохранены и видны тренеру');
+        showToast('Медкарта и ограничения сохранены в базе и видны тренеру');
+        renderApp();
       }
     }
 
-    function updateStudentNotificationSetting(key, val) {
+    async function updateStudentNotificationSetting(key, val) {
       const student = getCurrentStudent();
+      if (!student) return;
       student.notification_settings[key] = val;
-      saveAppData();
-      triggerHaptic('light');
-      showToast('Настройки уведомлений в Telegram обновлены');
       renderApp();
+      await persistStudentToSupabase(student);
+      triggerHaptic('light');
+      showToast('Настройки уведомлений в Telegram сохранены');
     }
 
     // П.15: Сетка дат заморозки в Профиле (h-auto, p-4 pb-5, grid grid-cols-2 gap-3 mt-3 w-full) и 24ч окно оплаты
@@ -3148,7 +3598,7 @@ function renderOnboardingScreen() {
                     <span>Ссылка активна только сегодня (до 23:59)</span>
                   </span>
                 </div>
-                <a href="${sub.robokassa_url}" target="_blank" rel="noopener noreferrer" onclick="triggerHaptic('success')" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-neon hover:brightness-110 transition">
+                <a href="${sub.robokassa_url || '#'}" ${sub.robokassa_url ? 'target="_blank" rel="noopener noreferrer"' : ''} onclick="if(!'${sub.robokassa_url || ''}'){event.preventDefault();showToast('Ссылка на оплату ещё не указана тренером','error');return false;}triggerHaptic('success')" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-neon hover:brightness-110 transition">
                   <span>💳 ОПЛАТИТЬ АБОНЕМЕНТ</span>
                 </a>
               </div>
@@ -3165,7 +3615,7 @@ function renderOnboardingScreen() {
                 <div class="p-2.5 rounded-xl bg-[#0D1117] border border-[#30363D] flex items-center justify-between text-xs">
                   <div>
                     <span class="font-bold text-white">${p.date}</span>
-                    <span class="text-[#8B949E] ml-2">• ${p.total_sessions || (student.subscription && student.subscription.total) || 12} тренировок</span>
+                    <span class="text-[#8B949E] ml-2">• ${p.count ?? p.total_sessions ?? (student.subscription && student.subscription.total) ?? 0} тренировок</span>
                   </div>
                   <div class="flex items-center gap-2">
                     <span class="font-bold text-white">${p.amount}</span>
@@ -3312,7 +3762,7 @@ function renderOnboardingScreen() {
       renderTrainerSlotGeneratorModalContent();
     }
 
-    function applyTrainerGeneratedSchedule() {
+    async function applyTrainerGeneratedSchedule() {
       const iso = uiState.selectedTrainerScheduleDate;
       appData.schedule_slots[iso] = draftGeneratorSlots.map(s => ({
         time: s.time,
@@ -3320,11 +3770,11 @@ function renderOnboardingScreen() {
         is_open: s.is_open,
         booked_by: s.booked_by
       }));
-      saveAppData();
       closeModal();
-      triggerHaptic('success');
-      showToast(`Расписание на ${formatHumanDate(iso)} опубликовано для подопечных!`);
       renderApp();
+      await persistScheduleSlotsToSupabase();
+      triggerHaptic('success');
+      showToast(`Расписание на ${formatHumanDate(iso)} сохранено в облаке!`);
     }
 
     function renderTrainerSlotGeneratorModalContent() {
@@ -3375,11 +3825,13 @@ function renderOnboardingScreen() {
       `);
     }
 
-    function emergencyTrainerCancelBooking(isoDate, studentId, startTime) {
+    async function emergencyTrainerCancelBooking(isoDate, studentId, startTime) {
       const st = getStudentById(studentId);
+      let cancelledBookingId = null;
       if (st && Array.isArray(st.active_bookings)) {
         const target = st.active_bookings.find(b => b.date === isoDate && (!startTime || b.time === startTime));
         if (target) {
+          cancelledBookingId = target.id;
           releaseBookingEntryFromSchedule(st, target);
           st.active_bookings = st.active_bookings.filter(b => b.id !== target.id);
         } else {
@@ -3392,21 +3844,38 @@ function renderOnboardingScreen() {
           });
           st.active_bookings = st.active_bookings.filter(b => b.date !== isoDate);
         }
+        if (st.subscription) {
+          const total = Math.max(0, Number(st.subscription.total) || 0);
+          const used = Math.max(0, (Number(st.subscription.used) || 0) - 1);
+          st.subscription.used = used;
+          st.subscription.used_sessions = used;
+          st.subscription.remaining = Math.max(0, total - used);
+        }
       }
-      saveAppData();
+      renderApp();
+      if (supabaseClient) {
+        try {
+          if (cancelledBookingId && !String(cancelledBookingId).startsWith('bk-')) {
+            await supabaseClient.from('bookings').delete().eq('id', cancelledBookingId);
+          } else if (st) {
+            await supabaseClient.from('bookings').delete().eq('student_id', st.supabase_id || st.id).eq('session_date', isoDate);
+          }
+          if (st) await persistStudentToSupabase(st);
+          await persistScheduleSlotsToSupabase();
+        } catch (e) {}
+      }
       triggerHaptic('warning');
       showToast(`Тренировка ${st ? st.full_name : ''} отменена. Окно свободно.`);
-      renderApp();
     }
 
-    function toggleSingleTrainerHourQuick(isoDate, timeStr) {
+    async function toggleSingleTrainerHourQuick(isoDate, timeStr) {
       triggerHaptic('light');
       const daySlots = appData.schedule_slots[isoDate] || [];
       const slot = daySlots.find(s => s.time === timeStr);
       if (!slot || slot.booked_by) return;
       slot.is_open = !slot.is_open;
-      saveAppData();
       renderApp();
+      await persistScheduleSlotsToSupabase();
     }
 
     function renderTrainerScheduleTab() {
@@ -3453,7 +3922,7 @@ function renderOnboardingScreen() {
         <div class="space-y-4 animate-fade">
           <button onclick="openTrainerSlotGeneratorModal()" class="w-full bg-[#10B981] hover:bg-[#059669] text-[#090C10] font-bold py-3.5 px-4 rounded-2xl flex items-center justify-center gap-2.5 text-center text-xs tracking-wider uppercase transition-all shadow-lg shadow-[#10B981]/20">
   <i data-lucide="sliders-horizontal" class="w-4 h-4 shrink-0"></i>
-  <span>Настроить доступные часы (метод вычёркивания)</span>
+  <span>Настроить доступные часы</span>
 </button>
 
           <div class="space-y-2">
@@ -3579,7 +4048,7 @@ function renderOnboardingScreen() {
           <div class="grid grid-cols-2 gap-2.5">
             <div>
               <label class="block text-[11px] text-[#8B949E] mb-1">Стартовый пакет (трен.)</label>
-              <input id="new-st-pack" type="number" min="1" max="100" value="12" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-3 py-2 text-xs font-bold text-white" />
+              <input id="new-st-pack" type="number" min="0" max="100" value="" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs font-bold text-white outline-none" />
             </div>
             <div>
               <label class="block text-[11px] text-[#8B949E] mb-1">Длительность сессии</label>
@@ -3666,53 +4135,15 @@ function renderOnboardingScreen() {
 
       const fio = (nameEl ? nameEl.value.trim() : '') || 'Новый Подопечный';
       const cleanUser = (userEl ? userEl.value.trim() : '').replace(/^@/, '');
-      const pack = Math.max(1, parseInt(packEl ? packEl.value : 12, 10) || 12);
-      const dur = parseInt(durEl ? durEl.value : 120, 10) || 120;
+      const rawPackVal = packEl ? packEl.value.trim() : '';
+      const pack = rawPackVal === '' ? 0 : Math.max(0, parseInt(rawPackVal, 10) || 0);
+      const dur = parseInt(durEl ? durEl.value : 60, 10) || 60;
       const parts = fio.split(' ');
-      const initials = ((parts[0] ? parts[0][0] : 'А') + (parts[1] ? parts[1][0] : 'В')).toUpperCase();
-      let assignedId = 'step-' + Date.now();
-      let createdSubId = null;
-
-      // 1. Создаем пользователя в облаке Supabase (если клиент доступен)
-      if (typeof supabaseClient !== 'undefined' && supabaseClient) {
-        try {
-          const { data: newUser, error: userErr } = await supabaseClient
-            .from('users')
-            .insert([{
-              telegram_id: Date.now(),
-              first_name: parts[0] || fio,
-              last_name: parts.slice(1).join(' ') || '',
-              username: cleanUser || customCode.toLowerCase(),
-              role: 'student'
-            }])
-            .select()
-            .single();
-
-          if (newUser && newUser.id) {
-            assignedId = newUser.id;
-            const { data: newSub } = await supabaseClient
-              .from('subscriptions')
-              .insert([{
-                student_id: newUser.id,
-                total_sessions: pack,
-                used_sessions: 0,
-                session_duration_minutes: dur,
-                billing_day: 5,
-                status: 'active'
-              }])
-              .select()
-              .single();
-
-            if (newSub) createdSubId = newSub.id;
-          }
-        } catch (err) {
-          console.warn('Ошибка сохранения нового ученика в Supabase:', err);
-        }
-      }
+      const initials = ((parts[0] ? parts[0][0] : 'А') + (parts[1] ? parts[1][0] : 'Т')).toUpperCase();
 
       const newStudent = {
-        id: assignedId,
-        supabase_id: assignedId,
+        id: 'step-' + Date.now(),
+        supabase_id: null,
         access_code: customCode,
         telegram_username: cleanUser,
         full_name: fio,
@@ -3721,48 +4152,35 @@ function renderOnboardingScreen() {
         freeze_details: { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
         session_duration: dur,
         subscription: {
-          id: createdSubId,
+          id: null,
           total: pack,
           total_sessions: pack,
           used: 0,
           used_sessions: 0,
           remaining: pack,
-          payment_day: 5,
-          robokassa_sum: '24 000 ₽',
-          robokassa_url: 'https://auth.robokassa.ru/Merchant/Index.aspx?MerchantLogin=StepValueCoach&OutSum=24000'
+          payment_day: 1,
+          billing_day: 1,
+          robokassa_sum: '0 ₽',
+          robokassa_url: ''
         },
-        payment_history: [
-          { date: formatDotDate(formatISO(getTodayDateObj())), count: pack, amount: '24 000 ₽', status: 'Оплачено' }
-        ],
-        medical_notes: 'Ограничений пока не указано',
+        payment_history: [],
+        medical_notes: '',
         trainer_private_notes: '',
         notification_settings: { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
         workouts: [],
-        anthropometry: [
-          { date: formatDotDate(formatISO(getTodayDateObj())), chest: 100, waist: 80, arms: 36 }
-        ],
+        anthropometry: [],
         checkups: [],
-        inbody: [
-          enrichInBodyRecord({ date: formatDotDate(formatISO(getTodayDateObj())), muscle_mass: 35.0, body_fat_pct: 16.0, water: 46.0, weight: 78.0 })
-        ],
-        photo_reports: [
-          {
-            date: 'Октябрь 2026',
-            front_url: createSilhouetteDataUri('Октябрь 2026', 'СПЕРЕДИ', 6, 2, '#00E676'),
-            side_url: createSilhouetteDataUri('Октябрь 2026', 'СБОКУ', 6, 2, '#00E676'),
-            back_url: createSilhouetteDataUri('Октябрь 2026', 'СЗАДИ', 6, 2, '#00E676'),
-            front_custom: false,
-            side_custom: false,
-            back_custom: false
-          }
-        ],
+        inbody: [],
+        photo_reports: [],
         active_bookings: []
       };
 
       appData.students.push(newStudent);
-      saveAppData();
       copyInviteCode(customCode);
       closeModal();
+      renderApp();
+
+      await persistStudentToSupabase(newStudent);
       showToast(`Подопечный ${fio} создан и сохранён в облаке!`);
       renderApp();
     }
@@ -3790,26 +4208,25 @@ function renderOnboardingScreen() {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
-    function saveTrainerWorkoutReview(studentId, workoutId) {
+    async function saveTrainerWorkoutReview(studentId, workoutId) {
       const st = getStudentById(studentId);
       if (!st) return;
       const w = (st.workouts || []).find(item => item.id === workoutId);
       const commentEl = document.getElementById('trainer-workout-comment-input');
       if (w && commentEl) {
         w.trainer_comment = commentEl.value.trim();
-        saveAppData();
-        triggerHaptic('success');
-        showToast('Комментарий к тренировке сохранён и виден подопечному!');
         renderApp();
+        await persistStudentToSupabase(st);
+        triggerHaptic('success');
+        showToast('Комментарий к тренировке сохранён в облаке и виден подопечному!');
       }
     }
 
-    // П.8 и П.16: Модалка ввода антропометрии строго на 3 параметра (Грудные, Талия, Руки) + кнопка «+ Внести замеры»
     function openTrainerAddAnthropometryModal(studentId) {
       const st = getStudentById(studentId);
       if (!st) return;
       const list = (st.anthropometry || []).map(normalizeAnthropometryRecord);
-      const last = list[list.length - 1] || { chest: 104, waist: 79, arms: 39.5 };
+      const last = list[list.length - 1] || { chest: 0, waist: 0, arms: 0 };
       openModal(`
         <div class="space-y-3.5">
           <div class="flex items-center justify-between">
@@ -3820,15 +4237,15 @@ function renderOnboardingScreen() {
           <div class="grid grid-cols-3 gap-2.5">
             <div>
               <label class="block text-[11px] text-[#8B949E] mb-1">Грудные (см)</label>
-              <input id="tr-anth-chest" type="number" step="0.5" value="${last.chest}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-3 py-2 text-xs font-bold text-white" />
+              <input id="tr-anth-chest" type="number" step="0.5" value="${last.chest || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-3 py-2 text-xs font-bold text-white" />
             </div>
             <div>
               <label class="block text-[11px] text-[#8B949E] mb-1">Талия (см)</label>
-              <input id="tr-anth-waist" type="number" step="0.5" value="${last.waist}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-3 py-2 text-xs font-bold text-white" />
+              <input id="tr-anth-waist" type="number" step="0.5" value="${last.waist || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-3 py-2 text-xs font-bold text-white" />
             </div>
             <div>
               <label class="block text-[11px] text-[#8B949E] mb-1">Руки (см)</label>
-              <input id="tr-anth-arms" type="number" step="0.5" value="${last.arms}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-3 py-2 text-xs font-bold text-white" />
+              <input id="tr-anth-arms" type="number" step="0.5" value="${last.arms || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-3 py-2 text-xs font-bold text-white" />
             </div>
           </div>
           <button onclick="saveTrainerAnthropometry('${studentId}')" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase shadow-neon">
@@ -3838,11 +4255,11 @@ function renderOnboardingScreen() {
       `);
     }
 
-    function saveTrainerAnthropometry(studentId) {
+    async function saveTrainerAnthropometry(studentId) {
       const st = getStudentById(studentId);
       if (!st) return;
       const list = (st.anthropometry || []).map(normalizeAnthropometryRecord);
-      const last = list[list.length - 1] || { chest: 100, waist: 78, arms: 39 };
+      const last = list[list.length - 1] || { chest: 0, waist: 0, arms: 0 };
       const rawC = parseFloat(document.getElementById('tr-anth-chest').value);
       const rawW = parseFloat(document.getElementById('tr-anth-waist').value);
       const rawA = parseFloat(document.getElementById('tr-anth-arms').value);
@@ -3853,21 +4270,35 @@ function renderOnboardingScreen() {
         arms: !isNaN(rawA) ? rawA : last.arms
       };
       st.anthropometry.push(entry);
-      saveAppData();
       closeModal();
-      triggerHaptic('success');
-      showToast('Новые замеры (Грудные, Талия, Руки) сохранены!');
       renderApp();
+      await persistStudentToSupabase(st);
+      triggerHaptic('success');
+      showToast('Новые замеры (Грудные, Талия, Руки) сохранены в базе!');
     }
 
-    function adjustStudentRemainingBalance(studentId, delta) {
+    async function adjustStudentRemainingBalance(studentId, delta) {
       const st = getStudentById(studentId);
       if (!st || !st.subscription) return;
-      const total = Math.max(1, Number(st.subscription.total_sessions || st.subscription.total) || 12);
-      let currentUsed = Math.min(total, Math.max(0, Number(st.subscription.used_sessions ?? st.subscription.used) || 0));
-      // delta > 0 (+1 к остатку) означает уменьшение used
-      // delta < 0 (-1 от остатка) означает увеличение used
-      currentUsed = Math.max(0, Math.min(total, currentUsed - delta));
+
+      syncTrainerManagementDraftFromDOM(st);
+
+      let total = Math.max(0, Number(st.subscription.total_sessions ?? st.subscription.total ?? 0) || 0);
+      let currentUsed = Math.min(total, Math.max(0, Number(st.subscription.used_sessions ?? st.subscription.used ?? 0) || 0));
+
+      if (delta > 0) {
+        if (currentUsed > 0) {
+          currentUsed = Math.max(0, currentUsed - delta);
+        } else {
+          total += delta;
+        }
+      } else if (delta < 0) {
+        const rem = Math.max(0, total - currentUsed);
+        if (rem > 0) {
+          currentUsed = Math.min(total, currentUsed - delta);
+        }
+      }
+
       const remaining = Math.max(0, total - currentUsed);
 
       st.subscription.total = total;
@@ -3876,25 +4307,20 @@ function renderOnboardingScreen() {
       st.subscription.used_sessions = currentUsed;
       st.subscription.remaining = remaining;
 
-      if (typeof supabaseClient !== 'undefined' && supabaseClient && st.subscription.id) {
-        supabaseClient
-          .from('subscriptions')
-          .update({ used_sessions: currentUsed })
-          .eq('id', st.subscription.id)
-          .then();
-      }
-
-      saveAppData();
-      triggerHaptic('light');
-      showToast(`Баланс: осталось ${remaining} из ${total}`);
       renderApp();
+      await persistStudentToSupabase(st);
+      triggerHaptic('light');
+      showToast(`Баланс сохранён: осталось ${remaining} из ${total}`);
     }
 
-    function updateStudentTotalSubscription(studentId, totalVal) {
+    async function updateStudentTotalSubscription(studentId, totalVal) {
       const st = getStudentById(studentId);
       if (!st || !st.subscription) return;
-      const newTotal = Math.max(1, parseInt(totalVal, 10) || 12);
-      let currentUsed = Math.min(newTotal, Math.max(0, Number(st.subscription.used_sessions ?? st.subscription.used) || 0));
+
+      syncTrainerManagementDraftFromDOM(st);
+
+      const newTotal = Math.max(0, parseInt(totalVal, 10) || 0);
+      const currentUsed = Math.min(newTotal, Math.max(0, Number(st.subscription.used_sessions ?? st.subscription.used ?? 0) || 0));
       const remaining = Math.max(0, newTotal - currentUsed);
 
       st.subscription.total = newTotal;
@@ -3903,27 +4329,22 @@ function renderOnboardingScreen() {
       st.subscription.used_sessions = currentUsed;
       st.subscription.remaining = remaining;
 
-      if (typeof supabaseClient !== 'undefined' && supabaseClient && st.subscription.id) {
-        supabaseClient
-          .from('subscriptions')
-          .update({ total_sessions: newTotal, used_sessions: currentUsed })
-          .eq('id', st.subscription.id)
-          .then();
-      }
-
-      saveAppData();
-      showToast(`Пакет обновлён: ${remaining} из ${newTotal} занятий`);
       renderApp();
+      await persistStudentToSupabase(st);
+      showToast(`Пакет обновлён в базе: ${remaining} из ${newTotal} занятий`);
     }
 
-    function setStudentSessionDuration(studentId, durationMins) {
+    async function setStudentSessionDuration(studentId, durationMins) {
       const st = getStudentById(studentId);
       if (!st) return;
-      st.session_duration = Number(durationMins);
-      saveAppData();
-      triggerHaptic('light');
-      showToast(`Длительность тренировки изменена на ${formatDurationLabel(st.session_duration)}`);
+
+      syncTrainerManagementDraftFromDOM(st);
+
+      st.session_duration = Number(durationMins) || 60;
       renderApp();
+      await persistStudentToSupabase(st);
+      triggerHaptic('light');
+      showToast(`Длительность тренировки сохранена: ${formatDurationLabel(st.session_duration)}`);
     }
 
     function formatRublesFromNumber(numVal) {
@@ -3999,6 +4420,7 @@ function renderOnboardingScreen() {
       // 3. Синхронизируем удаление с Supabase
       if (typeof supabaseClient !== 'undefined' && supabaseClient && targetDbId && !String(targetDbId).startsWith('step-')) {
         try {
+          await supabaseClient.from('student_reports').delete().eq('student_id', targetDbId);
           await supabaseClient.from('bookings').delete().eq('student_id', targetDbId);
           await supabaseClient.from('subscriptions').delete().eq('student_id', targetDbId);
           await supabaseClient.from('users').delete().eq('id', targetDbId);
@@ -4018,46 +4440,15 @@ function renderOnboardingScreen() {
       const st = (appData.students || []).find(s => String(s.id) === String(studentId));
       if (!st) return;
 
-      const tgEl = document.getElementById('tm-tg-input');
-      const sumEl = document.getElementById('tm-sum-input');
-      const urlEl = document.getElementById('tm-url-input');
-      const notesEl = document.getElementById('tm-notes-input');
+      syncTrainerManagementDraftFromDOM(st);
 
-      if (!st.subscription) st.subscription = {};
-
-      if (tgEl) st.telegram_username = tgEl.value.trim().replace(/^@/, '');
-      const rawNum = sumEl ? Math.max(0, parseInt(sumEl.value, 10) || 0) : parseNumber(st.subscription.robokassa_sum || 0);
-      st.subscription.robokassa_sum = formatRublesFromNumber(rawNum);
-
-      if (urlEl) {
-        let updatedUrl = urlEl.value.trim();
-        if (/OutSum=\d+/i.test(updatedUrl)) {
-          updatedUrl = updatedUrl.replace(/OutSum=\d+/i, 'OutSum=' + rawNum);
-        }
-        st.subscription.robokassa_url = updatedUrl;
+      const ok = await persistStudentToSupabase(st);
+      if (ok) {
+        triggerHaptic('success');
+        showToast('Информация профиля, финансы и заметка сохранены в базе!');
+      } else {
+        showToast('Не удалось сохранить изменения в облаке. Проверьте соединение.', 'error');
       }
-
-      if (notesEl) st.trainer_private_notes = notesEl.value.trim();
-
-      //saveAppData();
-
-      if (typeof supabaseClient !== 'undefined' && supabaseClient) {
-        try {
-          await supabaseClient
-            .from('students')
-            .update({
-              telegram_username: st.telegram_username,
-              subscription: st.subscription,
-              trainer_private_notes: st.trainer_private_notes
-            })
-            .eq('id', st.id);
-        } catch (err) {
-          console.error('Ошибка сохранения в Supabase:', err);
-        }
-      }
-
-      triggerHaptic('success');
-      showToast('Контакт @username, настройки оплаты и заметка сохранены!');
       renderApp();
     }
 
@@ -4555,7 +4946,7 @@ function renderOnboardingScreen() {
               <div class="grid grid-cols-2 gap-3 items-center">
                 <div>
                   <label class="block text-[11px] text-[#8B949E] mb-1">Пакет тренировок (всего)</label>
-                  <input type="number" min="1" max="100" value="${st.subscription.total}" onchange="updateStudentTotalSubscription('${st.id}', this.value)" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-3 py-2 text-sm font-extrabold text-white" />
+                  <input id="tr-mgmt-total-pack" type="number" min="0" max="100" value="${st.subscription.total > 0 ? st.subscription.total : ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" onchange="updateStudentTotalSubscription('${st.id}', this.value)" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-sm font-extrabold text-white outline-none" />
                 </div>
                 <div>
                   <span class="block text-[11px] text-[#8B949E] mb-1">Текущий остаток: <strong class="text-[#00E676]">${st.subscription.remaining}</strong></span>
@@ -4569,7 +4960,7 @@ function renderOnboardingScreen() {
 
             <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-4 space-y-2.5">
               <h3 class="text-xs font-bold uppercase tracking-wider text-[#00E676]">2. Персональная длительность тренировки</h3>
-              <p class="text-[11px] text-[#8B949E]">Под эту настройку автоматически фильтруются свободные окна у подопечного:</p>
+              <p class="text-[11px] text-[#8B949E]">Под эту настройку фильтруются свободные окна у подопечного:</p>
               <div class="grid grid-cols-4 gap-2">
                 ${durations.map(d => `
                   <button onclick="setStudentSessionDuration('${st.id}', ${d.mins})" class="py-2.5 rounded-xl text-xs font-extrabold border transition ${
@@ -4584,7 +4975,7 @@ function renderOnboardingScreen() {
             <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-4 space-y-3">
               <div class="flex items-center justify-between">
                 <h3 class="text-xs font-bold uppercase tracking-wider text-[#00E676]">3. Контакт Telegram и оплата</h3>
-                <span class="text-[11px] text-[#8B949E]">День счёта: <strong class="text-white">${st.subscription.payment_day}-е число</strong></span>
+                <span class="text-[11px] text-[#8B949E]">День счёта: <strong id="tr-mgmt-payment-day-badge" class="text-white">${st.subscription.payment_day}-е число</strong></span>
               </div>
               <div>
                 <label class="block text-[11px] text-[#8B949E] mb-1">Индивидуальный день выставления счёта (только для тренера)</label>
@@ -4603,13 +4994,13 @@ function renderOnboardingScreen() {
               <div>
                 <label class="block text-[11px] text-[#8B949E] mb-1">Сумма к оплате</label>
                 <div class="relative flex items-center">
-                  <input id="tr-mgmt-robokassa-sum" type="number" min="0" step="500" value="${numericSum}" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl pl-3 pr-9 py-2 text-xs font-bold text-white outline-none" />
+                  <input id="tr-mgmt-robokassa-sum" type="number" min="0" step="500" value="${numericSum > 0 ? numericSum : ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl pl-3 pr-9 py-2 text-xs font-bold text-white outline-none" />
                   <span class="absolute right-4 pointer-events-none text-[#8B949E] font-bold">₽</span>
                 </div>
               </div>
               <div>
                 <label class="block text-[11px] text-[#8B949E] mb-1">Персональная ссылка на оплату абонемента</label>
-                <input id="tr-mgmt-robokassa-url" type="text" value="${st.subscription.robokassa_url}" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-3 py-2 text-xs text-white" />
+                <input id="tr-mgmt-robokassa-url" type="text" value="${st.subscription.robokassa_url || ''}" placeholder="https://..." class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs text-white outline-none" />
               </div>
             </div>
 
@@ -4629,8 +5020,8 @@ function renderOnboardingScreen() {
                 <span class="text-[10px] text-[#8B949E]">Видите только вы</span>
               </div>
               <textarea id="tr-mgmt-private-notes" rows="3" placeholder="Цели, психология, особенности режима клиента..." class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl p-3 text-xs text-white outline-none resize-none">${st.trainer_private_notes || ''}</textarea>
-              <button onclick="saveTrainerManagementFinanceAndNotes('${st.id}')" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider shadow-neon">
-                Сохранить параметры и заметку
+              <button type="button" onclick="saveTrainerManagementFinanceAndNotes('${st.id}')" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider shadow-neon active:scale-[0.99] transition">
+                Сохранить информацию
               </button>
             </div>
 
@@ -4856,15 +5247,18 @@ function renderOnboardingScreen() {
 
       renderApp();
 
-      // Фоновая облачная синхронизация единого списка подопечных и их балансов
-      syncAllStudentsFromSupabase();
-
-      if (appData.current_role) {
+      // Облачная синхронизация единого списка подопечных, расписания и балансов + авто-восстановление сессии
+      await syncAllStudentsFromSupabase();
+      const restored = await restoreSessionFromTelegram();
+      if (restored) {
+        renderApp();
+      } else if (appData.current_role) {
         const activeStudent = appData.current_role === 'student' ? getCurrentStudent() : null;
         await getOrCreateSupabaseUser(
           appData.current_role === 'trainer' ? 'coach' : 'student',
           { autoEnter: true, student: activeStudent }
         );
+        renderApp();
       }
     });
   </script>
