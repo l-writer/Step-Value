@@ -606,9 +606,6 @@
       </div>
 
       <div class="flex items-center gap-1.5">
-        <button id="btn-reset-demo" onclick="openResetModal()" title="Сбросить демо-данные" class="p-2 rounded-lg bg-[#161B22] hover:bg-[#1F242C] text-[#8B949E] hover:text-white border border-[#30363D] transition">
-          <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
-        </button>
         <button id="btn-switch-role" onclick="switchRolePrompt()" title="Сменить роль / профиль" aria-label="Сменить роль" class="p-2 rounded-lg bg-[#161B22] hover:bg-[#1F242C] active:scale-95 text-[#8B949E] hover:text-white border border-[#30363D] transition shadow-sm flex items-center justify-center">
           <i data-lucide="arrow-left-right" class="w-4 h-4"></i>
         </button>
@@ -1586,17 +1583,17 @@ function renderOnboardingScreen() {
           ` : ''}
 
           ${uiState.onboardingMode === 'trainer_pin' ? `
-            <div class="bg-[#161B22] border border-[#10B981]/60 rounded-2xl p-4 shadow-neon space-y-3 animate-fade">
+            <div class="bg-[#161B22] border border-[#30363D] focus-within:border-[#00E676] rounded-2xl p-4 shadow-neon space-y-3 animate-fade">
               <div class="flex items-center justify-between">
-                <span class="text-xs font-bold text-white flex items-center gap-1.5">
+                <span class="text-xs font-semibold text-white flex items-center gap-1.5">
                   <i data-lucide="lock" class="w-4 h-4 text-[#00E676]"></i>
-                  Мастер-PIN наставника (${appData.trainer_profile.full_name})
+                  Вход для наставника
                 </span>
-                <button onclick="quickFillCode('input-trainer-pin', 'COACH2026')" class="text-[11px] text-[#00E676] underline">COACH2026</button>
+                <span class="text-[11px] text-[#8B949E]">Только для тренера</span>
               </div>
-              <input id="input-trainer-pin" type="text" value="COACH2026" placeholder="Мастер-код: COACH2026" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3.5 py-2.5 text-sm font-bold tracking-wider text-white uppercase outline-none" />
-              <button onclick="submitTrainerPin()" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider shadow-neon active:scale-[0.99] transition">
-                Открыть админ-панель тренера
+              <input id="input-trainer-pin" type="password" value="" placeholder="Введите пароль доступа" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3.5 py-2.5 text-sm font-semibold tracking-wider text-white outline-none select-text" style="-webkit-user-select: text !important; user-select: text !important;" />
+              <button onclick="submitTrainerPin()" class="mt-2 w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-bold text-xs uppercase tracking-wider shadow-neon active:scale-[0.99] transition">
+                Войти в панель тренера
               </button>
             </div>
           ` : ''}
