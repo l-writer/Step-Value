@@ -4058,7 +4058,7 @@ function renderOnboardingScreen() {
       if (urlEl) {
         let updatedUrl = urlEl.value.trim();
         if (/OutSum=\d+/i.test(updatedUrl)) {
-          updatedUrl = updatedUrl.replace(/OutSum=\d+/i, `OutSum=${rawNum}`);
+          updatedUrl = updatedUrl.replace(/OutSum=\d+/i, 'OutSum=' + rawNum);
         }
         st.subscription.robokassa_url = updatedUrl;
       }
@@ -4067,7 +4067,6 @@ function renderOnboardingScreen() {
 
       saveAppData();
 
-      // Сохраняем напрямую в Supabase, чтобы настройки не слетали
       if (typeof supabaseClient !== 'undefined' && supabaseClient) {
         try {
           await supabaseClient
@@ -4079,7 +4078,7 @@ function renderOnboardingScreen() {
             })
             .eq('id', st.id);
         } catch (err) {
-          console.error('Ошибка сохранения настроек в Supabase:', err);
+          console.error('Ошибка сохранения в Supabase:', err);
         }
       }
 
