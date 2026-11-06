@@ -860,343 +860,20 @@
 
     function buildInitialSeedData() {
       const days = getUpcomingDays(10);
-      const d1 = days[1].iso;
-      const d2 = days[2].iso;
-      const d4 = days[4].iso;
-
       const scheduleSlots = {};
-      days.forEach((dayObj, idx) => {
-        if (idx === 1) {
-          scheduleSlots[dayObj.iso] = buildDefaultHoursForDay(9, 21, [12, 13, 18], {
-            '14:00': 'step-101',
-            '15:00': 'step-101'
-          });
-        } else if (idx === 2) {
-          scheduleSlots[dayObj.iso] = buildDefaultHoursForDay(9, 21, [13, 14, 19], {
-            '11:00': 'step-102',
-            '12:00': 'step-102'
-          });
-        } else if (idx === 4) {
-          scheduleSlots[dayObj.iso] = buildDefaultHoursForDay(9, 21, [13, 17], {
-            '16:00': 'step-101',
-            '17:00': 'step-101'
-          });
-        } else {
-          scheduleSlots[dayObj.iso] = buildDefaultHoursForDay(9, 21, [13, 17], {});
-        }
+      days.forEach(dayObj => {
+        scheduleSlots[dayObj.iso] = buildDefaultHoursForDay(9, 21, [13, 17], {});
       });
-
-      const todayDayOfMonth = getTodayDateObj().getDate();
 
       return {
         current_role: null,
-        current_student_id: 'step-101',
+        current_student_id: null,
         trainer_profile: {
           master_pin: 'STEP878',
           full_name: 'Степан',
           telegram_username: 'winnie_v1'
         },
-        students: [
-          {
-            id: 'step-101',
-            access_code: 'STEP-101',
-            telegram_username: 'alex_voronov_fit',
-            full_name: 'Александр Воронов',
-            avatar: 'АВ',
-            status: 'active',
-            freeze_details: {
-              is_frozen: false,
-              from: '2026-11-01',
-              to: '2026-11-15'
-            },
-            session_duration: 120,
-            subscription: {
-              total: 12,
-              remaining: 8,
-              payment_day: todayDayOfMonth,
-              robokassa_sum: '24 000 ₽',
-              robokassa_url: 'https://auth.robokassa.ru/Merchant/Index.aspx?MerchantLogin=StepValueCoach&OutSum=24000&Description=StepValue12Sessions'
-            },
-            payment_history: [
-              { date: '05.10.2026', count: 12, amount: '24 000 ₽', status: 'Оплачено' },
-              { date: '05.09.2026', count: 12, amount: '24 000 ₽', status: 'Оплачено' },
-              { date: '05.08.2026', count: 8, amount: '18 000 ₽', status: 'Оплачено' }
-            ],
-            medical_notes: 'Ноет правое плечо при жимах, не делать присед со свободным весом из-за колена',
-            trainer_private_notes: 'Цель — сушка к декабрю, строгий контроль углеводов, тренируется перед работой. Отлично реагирует на дроп-сеты.',
-            notification_settings: {
-              workout_reminder: '2h',
-              sunday_checkup: true,
-              monthly_inbody_photos: true
-            },
-            workouts: [
-              {
-                id: 'w-101-1',
-                date: '19 окт 2026',
-                title: 'День груди',
-                student_comment: 'Хороший памп, плечо почти не беспокоило на разминке.',
-                trainer_comment: 'Отличная динамика! В жиме гантелей следи за опусканием локтей чуть ниже параллели.',
-                exercises: [
-                  { name: 'Жим штанги лёжа', sets: 4, reps: 8, weight: 82.5, video_url: '' },
-                  { name: 'Жим гантелей на наклонной скамье', sets: 4, reps: 10, weight: 30, video_url: '' },
-                  { name: 'Отжимания на брусьях с весом', sets: 3, reps: 10, weight: 15, video_url: '' },
-                  { name: 'Разгибания рук на блоке (трицепс)', sets: 4, reps: 12, weight: 25, video_url: '' }
-                ]
-              },
-              {
-                id: 'w-101-2',
-                date: '22 окт 2026',
-                title: 'День спины',
-                student_comment: 'Тяга шла мощно, хват держит уверенно.',
-                trainer_comment: 'В тяге верхнего блока не отклоняй корпус назад сильнее 15 градусов, тяни локтями к тазу.',
-                exercises: [
-                  { name: 'Подтягивания широким хватом', sets: 4, reps: 10, weight: 10, video_url: 'https://t.me/coach_denis/tech_pullups_101' },
-                  { name: 'Тяга верхнего блока к груди', sets: 4, reps: 12, weight: 65, video_url: '' },
-                  { name: 'Тяга горизонтального блока', sets: 4, reps: 10, weight: 70, video_url: '' },
-                  { name: 'Подъём штанги на бицепс', sets: 3, reps: 10, weight: 37.5, video_url: '' }
-                ]
-              },
-              {
-                id: 'w-101-3',
-                date: '26 окт 2026',
-                title: 'День груди',
-                student_comment: 'Тяжело дался 3 подход жима, но закрыл все повторения без помощи.',
-                trainer_comment: 'В жиме прижимай локти ближе к корпусу, вес пока не повышаем — закрепляем 90 кг на чистой технике.',
-                exercises: [
-                  { name: 'Жим штанги лёжа', sets: 4, reps: 8, weight: 90, video_url: 'https://t.me/coach_denis/bench_90kg_review' },
-                  { name: 'Жим гантелей на наклонной скамье', sets: 4, reps: 10, weight: 34, video_url: '' },
-                  { name: 'Жим ногами в тренажёре', sets: 4, reps: 12, weight: 190, video_url: '' },
-                  { name: 'Разгибания рук на блоке (трицепс)', sets: 4, reps: 12, weight: 27.5, video_url: '' }
-                ]
-              }
-            ],
-            anthropometry: [
-              { date: '26.09.2026', chest: 102.5, waist: 81.0, arms: 39.0 },
-              { date: '24.10.2026', chest: 104.0, waist: 79.0, arms: 39.5 }
-            ],
-            checkups: [
-              { date: '18.10.2026', fasting_weight: 82.1, workouts_done: 3, weights_growth: 'Жим +2.5 кг, спина по плану', sleep: 7, appetite: 8, diet: 8, digestion: 8 },
-              { date: '25.10.2026', fasting_weight: 81.4, workouts_done: 4, weights_growth: 'Жим +2.5 кг, тяга стабильно', sleep: 8, appetite: 9, diet: 9, digestion: 8 }
-            ],
-            inbody: [
-              enrichInBodyRecord({
-                date: '01.08.2026', muscle_mass: 37.1, body_fat_pct: 16.8, water: 47.9, weight: 83.6,
-                protein: 12.8, minerals: 4.15, visceral_fat: 7, bmi: 25.8, fat_free_mass: 69.6, bmr: 1873,
-                seg_left_arm: 3.7, seg_right_arm: 3.8, seg_torso: 28.9, seg_left_leg: 10.3, seg_right_leg: 10.4,
-                optimal_weight: 80.0, calorie_norm: 2480
-              }),
-              enrichInBodyRecord({
-                date: '01.09.2026', muscle_mass: 37.8, body_fat_pct: 15.5, water: 48.6, weight: 82.7,
-                protein: 13.1, minerals: 4.22, visceral_fat: 6, bmi: 25.5, fat_free_mass: 69.9, bmr: 1880,
-                seg_left_arm: 3.8, seg_right_arm: 3.9, seg_torso: 29.4, seg_left_leg: 10.5, seg_right_leg: 10.6,
-                optimal_weight: 80.0, calorie_norm: 2510
-              }),
-              enrichInBodyRecord({
-                date: '01.10.2026', muscle_mass: 38.4, body_fat_pct: 14.2, water: 49.5, weight: 81.8,
-                protein: 13.4, minerals: 4.30, visceral_fat: 5, bmi: 25.2, fat_free_mass: 70.2, bmr: 1886,
-                seg_left_arm: 3.9, seg_right_arm: 4.0, seg_torso: 29.8, seg_left_leg: 10.6, seg_right_leg: 10.7,
-                optimal_weight: 80.0, calorie_norm: 2550
-              })
-            ],
-            photo_reports: [
-              {
-                date: 'Сентябрь 2026',
-                front_url: createSilhouetteDataUri('Сентябрь 2026', 'СПЕРЕДИ', 2, 8, '#3B82F6'),
-                side_url: createSilhouetteDataUri('Сентябрь 2026', 'СБОКУ', 1, 9, '#3B82F6'),
-                back_url: createSilhouetteDataUri('Сентябрь 2026', 'СЗАДИ', 3, 8, '#3B82F6'),
-                front_custom: false,
-                side_custom: false,
-                back_custom: false
-              },
-              {
-                date: 'Октябрь 2026',
-                front_url: createSilhouetteDataUri('Октябрь 2026', 'СПЕРЕДИ', 10, 0, '#00E676'),
-                side_url: createSilhouetteDataUri('Октябрь 2026', 'СБОКУ', 8, 1, '#00E676'),
-                back_url: createSilhouetteDataUri('Октябрь 2026', 'СЗАДИ', 11, 0, '#00E676'),
-                front_custom: false,
-                side_custom: false,
-                back_custom: false
-              }
-            ],
-            active_bookings: [
-              { id: 'bk-101-1', date: d1, time: '14:00', duration: 120 },
-              { id: 'bk-101-2', date: d4, time: '16:00', duration: 120 }
-            ]
-          },
-          {
-            id: 'step-102',
-            access_code: 'STEP-102',
-            telegram_username: 'ekaterina_smirnova',
-            full_name: 'Екатерина Смирнова',
-            avatar: 'ЕС',
-            status: 'active',
-            freeze_details: {
-              is_frozen: false,
-              from: '2026-11-10',
-              to: '2026-11-20'
-            },
-            session_duration: 90,
-            subscription: {
-              total: 10,
-              remaining: 6,
-              payment_day: 10,
-              robokassa_sum: '20 000 ₽',
-              robokassa_url: 'https://auth.robokassa.ru/Merchant/Index.aspx?MerchantLogin=StepValueCoach&OutSum=20000&Description=StepValue10Sessions'
-            },
-            payment_history: [
-              { date: '10.10.2026', count: 10, amount: '20 000 ₽', status: 'Оплачено' },
-              { date: '10.09.2026', count: 10, amount: '20 000 ₽', status: 'Оплачено' }
-            ],
-            medical_notes: 'Чувствительная поясница, избегать осевой нагрузки без пояса.',
-            trainer_private_notes: 'Акцент на ягодичные и заднюю поверхность бедра. Отличная дисциплина по питанию.',
-            notification_settings: {
-              workout_reminder: '4h',
-              sunday_checkup: true,
-              monthly_inbody_photos: true
-            },
-            workouts: [
-              {
-                id: 'w-102-1',
-                date: '21 окт 2026',
-                title: 'День ног',
-                student_comment: 'Ягодичный мост зашёл отлично, забились ноги.',
-                trainer_comment: 'В верхней точке моста держи паузу 1.5 секунды без переразгибания поясницы.',
-                exercises: [
-                  { name: 'Ягодичный мост со штангой', sets: 4, reps: 12, weight: 75, video_url: 'https://t.me/coach_denis/hip_thrust_102' },
-                  { name: 'Румынская тяга с гантелями', sets: 4, reps: 10, weight: 22, video_url: '' },
-                  { name: 'Жим ногами в тренажёре', sets: 3, reps: 15, weight: 110, video_url: '' }
-                ]
-              },
-              {
-                id: 'w-102-2',
-                date: '25 окт 2026',
-                title: 'Тяжёлый верх',
-                student_comment: 'Тяга верхнего блока далась легко.',
-                trainer_comment: 'Молодец, на следующей неделе добавим +2.5 кг в тяге.',
-                exercises: [
-                  { name: 'Тяга верхнего блока к груди', sets: 4, reps: 12, weight: 35, video_url: '' },
-                  { name: 'Жим гантелей сидя (плечи)', sets: 3, reps: 12, weight: 10, video_url: '' },
-                  { name: 'Разгибания рук на блоке (трицепс)', sets: 3, reps: 15, weight: 15, video_url: '' }
-                ]
-              }
-            ],
-            anthropometry: [
-              { date: '25.09.2026', chest: 88.0, waist: 64.0, arms: 27.5 },
-              { date: '24.10.2026', chest: 88.0, waist: 62.5, arms: 28.0 }
-            ],
-            checkups: [
-              { date: '25.10.2026', fasting_weight: 56.8, workouts_done: 3, weights_growth: 'Ягодичный мост +5 кг', sleep: 9, appetite: 8, diet: 10, digestion: 9 }
-            ],
-            inbody: [
-              enrichInBodyRecord({
-                date: '01.09.2026', muscle_mass: 23.4, body_fat_pct: 20.4, water: 33.8, weight: 57.5,
-                protein: 8.9, minerals: 3.10, visceral_fat: 4, bmi: 20.8, fat_free_mass: 45.8, bmr: 1360,
-                seg_left_arm: 2.1, seg_right_arm: 2.1, seg_torso: 19.5, seg_left_leg: 7.4, seg_right_leg: 7.5,
-                optimal_weight: 56.0, calorie_norm: 1950
-              }),
-              enrichInBodyRecord({
-                date: '01.10.2026', muscle_mass: 24.1, body_fat_pct: 18.9, water: 34.5, weight: 56.8,
-                protein: 9.2, minerals: 3.18, visceral_fat: 3, bmi: 20.6, fat_free_mass: 46.1, bmr: 1366,
-                seg_left_arm: 2.2, seg_right_arm: 2.2, seg_torso: 19.9, seg_left_leg: 7.6, seg_right_leg: 7.6,
-                optimal_weight: 56.0, calorie_norm: 2000
-              })
-            ],
-            photo_reports: [
-              {
-                date: 'Сентябрь 2026',
-                front_url: createSilhouetteDataUri('Сентябрь 2026', 'СПЕРЕДИ', 1, 5, '#3B82F6'),
-                side_url: createSilhouetteDataUri('Сентябрь 2026', 'СБОКУ', 1, 5, '#3B82F6'),
-                back_url: createSilhouetteDataUri('Сентябрь 2026', 'СЗАДИ', 1, 5, '#3B82F6'),
-                front_custom: false,
-                side_custom: false,
-                back_custom: false
-              },
-              {
-                date: 'Октябрь 2026',
-                front_url: createSilhouetteDataUri('Октябрь 2026', 'СПЕРЕДИ', 5, 0, '#00E676'),
-                side_url: createSilhouetteDataUri('Октябрь 2026', 'СБОКУ', 5, 0, '#00E676'),
-                back_url: createSilhouetteDataUri('Октябрь 2026', 'СЗАДИ', 6, 0, '#00E676'),
-                front_custom: false,
-                side_custom: false,
-                back_custom: false
-              }
-            ],
-            active_bookings: [
-              { id: 'bk-102-1', date: d2, time: '11:00', duration: 90 }
-            ]
-          },
-          {
-            id: 'step-103',
-            access_code: 'STEP-103',
-            telegram_username: 'dmitry_sokolov_pro',
-            full_name: 'Дмитрий Соколов',
-            avatar: 'ДС',
-            status: 'frozen',
-            freeze_details: {
-              is_frozen: true,
-              from: '2026-10-25',
-              to: '2026-11-15'
-            },
-            session_duration: 60,
-            subscription: {
-              total: 8,
-              remaining: 5,
-              payment_day: 15,
-              robokassa_sum: '16 000 ₽',
-              robokassa_url: 'https://auth.robokassa.ru/Merchant/Index.aspx?MerchantLogin=StepValueCoach&OutSum=16000&Description=StepValue8Sessions'
-            },
-            payment_history: [
-              { date: '15.10.2026', count: 8, amount: '16 000 ₽', status: 'Оплачено' }
-            ],
-            medical_notes: 'Без травм, повышенное давление при интенсивном кардио.',
-            trainer_private_notes: 'В командировке до 15 ноября, абонемент заморожен.',
-            notification_settings: {
-              workout_reminder: '2h',
-              sunday_checkup: false,
-              monthly_inbody_photos: true
-            },
-            workouts: [
-              {
-                id: 'w-103-1',
-                date: '20 окт 2026',
-                title: 'Фулбоди',
-                student_comment: 'Отличная бодрая тренировка перед командировкой.',
-                trainer_comment: 'Жду возвращения 15 ноября, поддерживай шаговую активность!',
-                exercises: [
-                  { name: 'Жим штанги лёжа', sets: 3, reps: 10, weight: 70, video_url: '' },
-                  { name: 'Тяга горизонтального блока', sets: 3, reps: 12, weight: 60, video_url: '' },
-                  { name: 'Жим ногами в тренажёре', sets: 3, reps: 12, weight: 150, video_url: '' }
-                ]
-              }
-            ],
-            anthropometry: [
-              { date: '20.10.2026', chest: 108.0, waist: 88.0, arms: 40.0 }
-            ],
-            checkups: [
-              { date: '18.10.2026', fasting_weight: 89.4, workouts_done: 2, weights_growth: 'Веса стабильны', sleep: 7, appetite: 8, diet: 7, digestion: 8 }
-            ],
-            inbody: [
-              enrichInBodyRecord({
-                date: '01.10.2026', muscle_mass: 39.2, body_fat_pct: 19.5, water: 51.0, weight: 89.4,
-                protein: 13.7, minerals: 4.50, visceral_fat: 9, bmi: 26.7, fat_free_mass: 72.0, bmr: 1925,
-                seg_left_arm: 4.1, seg_right_arm: 4.1, seg_torso: 31.0, seg_left_leg: 11.2, seg_right_leg: 11.3,
-                optimal_weight: 84.0, calorie_norm: 2650
-              })
-            ],
-            photo_reports: [
-              {
-                date: 'Октябрь 2026',
-                front_url: createSilhouetteDataUri('Октябрь 2026', 'СПЕРЕДИ', 6, 4, '#10B981'),
-                side_url: createSilhouetteDataUri('Октябрь 2026', 'СБОКУ', 6, 4, '#10B981'),
-                back_url: createSilhouetteDataUri('Октябрь 2026', 'СЗАДИ', 6, 4, '#10B981'),
-                front_custom: false,
-                side_custom: false,
-                back_custom: false
-              }
-            ],
-            active_bookings: []
-          }
-        ],
+        students: [],
         schedule_slots: scheduleSlots
       };
     }
@@ -1279,30 +956,31 @@
     }
 
     function loadAppData() {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem('step_value_data');
-        if (raw) {
-          appData = JSON.parse(raw);
-          if (!appData.trainer_profile) appData.trainer_profile = {};
-          appData.trainer_profile.master_pin = 'STEP878';
-          migrateLoadedData();
-          autoProcessCompletedBookings();
-          saveAppData();
-          return;
-        }
-      } catch (e) {
-        console.warn('LocalStorage read error, using seed in-memory:', e);
-      }
       appData = buildInitialSeedData();
-      saveAppData();
+
+      try {
+        const savedRole = localStorage.getItem('sv_role');
+        const savedStudentId = localStorage.getItem('sv_student_id');
+        if (savedRole) appData.current_role = savedRole;
+        if (savedStudentId) appData.current_student_id = savedStudentId;
+      } catch (e) {}
+
+      migrateLoadedData();
     }
 
     function saveAppData() {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(appData));
-      } catch (e) {
-        console.warn('LocalStorage write warning:', e);
-      }
+        if (appData.current_role) {
+          localStorage.setItem('sv_role', appData.current_role);
+        } else {
+          localStorage.removeItem('sv_role');
+        }
+        if (appData.current_student_id) {
+          localStorage.setItem('sv_student_id', String(appData.current_student_id));
+        } else {
+          localStorage.removeItem('sv_student_id');
+        }
+      } catch (e) {}
     }
 
     function autoProcessCompletedBookings() {
