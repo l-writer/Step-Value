@@ -134,9 +134,7 @@
         }
       }
 
-      if (typeof saveAppData === 'function') {
-        saveAppData();
-      }
+
     }
 
 
@@ -1022,29 +1020,11 @@ const TELEGRAM_STORAGE_CONFIG = {
     function loadAppData() {
       appData = buildInitialSeedData();
 
-      try {
-        const savedRole = localStorage.getItem('sv_role');
-        const savedStudentId = localStorage.getItem('sv_student_id');
-        if (savedRole) appData.current_role = savedRole;
-        if (savedStudentId) appData.current_student_id = savedStudentId;
-      } catch (e) {}
-
       migrateLoadedData();
     }
 
     function saveAppData() {
-      try {
-        if (appData.current_role) {
-          localStorage.setItem('sv_role', appData.current_role);
-        } else {
-          localStorage.removeItem('sv_role');
-        }
-        if (appData.current_student_id) {
-          localStorage.setItem('sv_student_id', String(appData.current_student_id));
-        } else {
-          localStorage.removeItem('sv_student_id');
-        }
-      } catch (e) {}
+      return;
     }
 
     function autoProcessCompletedBookings() {
