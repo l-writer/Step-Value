@@ -1283,6 +1283,8 @@
         const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem('step_value_data');
         if (raw) {
           appData = JSON.parse(raw);
+          if (!appData.trainer_profile) appData.trainer_profile = {};
+          appData.trainer_profile.master_pin = 'STEP878';
           migrateLoadedData();
           autoProcessCompletedBookings();
           saveAppData();
