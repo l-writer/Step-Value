@@ -2336,17 +2336,42 @@ function renderOnboardingScreen() {
       const student = getCurrentStudent();
       const sub = student.subscription;
       const now = new Date();
-  const allBookings = student.active_bookings || [];
-  const activeBookings = allBookings.filter(bk => {
-    if (!bk.date || !bk.time) return true;
-    // Собираем дату и время тренировки: "YYYY-MM-DDTHH:mm:00"
-    const start = new Date(`${bk.date}T${bk.time}:00`);
-    if (isNaN(start.getTime())) return true;
-    const durationMinutes = Number(bk.duration_minutes || bk.duration || 60);
-    const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
-    // Показываем в активных только если время окончания ещё не наступило
-    return now < end;
-  });
+      const allBookings = student.active_bookings || [];
+      let hasExpired = false;
+
+      const activeBookings = [];
+      allBookings.forEach(bk => {
+        if (!bk.date || !bk.time) {
+          activeBookings.push(bk);
+          return;
+        }
+        const start = new Date(`${bk.date}T${bk.time}:00`);
+        const durationMinutes = Number(bk.duration_minutes || bk.duration || 60);
+        const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
+
+        if (now >= end) {
+          hasExpired = true;
+          if (student.subscription) {
+            const total = Math.max(0, Number(student.subscription.total) || 0);
+            const used = (Number(student.subscription.used) || 0) + 1;
+            student.subscription.used = used;
+            student.subscription.used_sessions = used;
+            student.subscription.remaining = Math.max(0, total - used);
+          }
+        } else {
+          activeBookings.push(bk);
+        }
+      });
+
+      if (hasExpired) {
+        student.active_bookings = activeBookings;
+        if (typeof persistStudentToSupabase === 'function') {
+          persistStudentToSupabase(student);
+        }
+        if (typeof saveAppData === 'function') {
+          saveAppData();
+        }
+      }
       const pct = sub.total > 0 ? Math.min(100, Math.round((sub.remaining / sub.total) * 100)) : 0;
       const todayDayNum = new Date().getDate();
       const isPaymentDayToday = Number(sub.payment_day) === Number(todayDayNum);
