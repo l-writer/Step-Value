@@ -2335,7 +2335,18 @@ function renderOnboardingScreen() {
     function renderStudentBookingTab() {
       const student = getCurrentStudent();
       const sub = student.subscription;
-      const activeBookings = student.active_bookings || [];
+      const now = new Date();
+  const allBookings = student.active_bookings || [];
+  const activeBookings = allBookings.filter(bk => {
+    if (!bk.date || !bk.time) return true;
+    // Собираем дату и время тренировки: "YYYY-MM-DDTHH:mm:00"
+    const start = new Date(`${bk.date}T${bk.time}:00`);
+    if (isNaN(start.getTime())) return true;
+    const durationMinutes = Number(bk.duration_minutes || bk.duration || 60);
+    const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
+    // Показываем в активных только если время окончания ещё не наступило
+    return now < end;
+  });
       const pct = sub.total > 0 ? Math.min(100, Math.round((sub.remaining / sub.total) * 100)) : 0;
       const todayDayNum = new Date().getDate();
       const isPaymentDayToday = Number(sub.payment_day) === Number(todayDayNum);
