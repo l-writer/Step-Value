@@ -5037,54 +5037,32 @@ function renderOnboardingScreen() {
             </div>
 
             <div class="space-y-3">
-              <h4 class="text-xs font-bold uppercase tracking-wider text-[#8B949E] px-1">Детальная разбивка по подходам</h4>
-              ${(w.exercises || []).map((ex, idx) => {
-                const setsCount = Math.max(1, Number(ex.sets) || 1);
-                let setRowsHtml = '';
-                for (let sNum = 1; sNum <= setsCount; sNum++) {
-                  setRowsHtml += `
-                    <tr class="border-t border-[#30363D]/60 text-xs">
-                      <td class="py-2 px-3 font-bold text-[#8B949E]">Подход #${sNum}</td>
-                      <td class="py-2 px-3 font-extrabold text-[#00E676] text-right">${ex.weight} кг</td>
-                      <td class="py-2 px-3 font-bold text-white text-right">${ex.reps} повт.</td>
-                    </tr>
-                  `;
-                }
-                return `
-                  <div class="bg-[#161B22] border border-[#30363D] rounded-2xl overflow-hidden">
-                    <div class="p-3.5 bg-[#1F242C] flex items-center justify-between">
-                      <span class="text-xs font-extrabold text-white">${idx + 1}. ${ex.name}</span>
-                      <span class="text-[11px] font-bold text-[#00E676]">${ex.sets} × ${ex.reps} • ${ex.weight} кг</span>
+              ${(w.exercises || []).map((ex, idx) => `
+              <div class="bg-[#161B22] border border-[#30363D] rounded-2xl overflow-hidden">
+                <div class="p-3.5 bg-[#1F242C] flex items-center justify-between">
+                  <span class="text-xs font-extrabold text-white">${idx + 1}. ${ex.name}</span>
+                  <span class="text-[11px] font-bold text-[#00E676] bg-[#00E676]/10 px-2.5 py-1 rounded-md border border-[#00E676]/20">
+                    ${ex.sets} ⨉ ${ex.reps} повт • ${ex.weight} кг
+                  </span>
+                </div>
+                ${ex.video_url ? `
+                  <div class="p-3 bg-[#0D1117] border-t border-[#10B981]/40 space-y-2">
+                    <div class="flex items-center justify-between text-xs">
+                      <span class="font-bold text-[#00E676] flex items-center gap-1.5">
+                        <i data-lucide="play-circle" class="w-4 h-4"></i>
+                        Видео подхода для разбора техники
+                      </span>
+                      <a href="${ex.video_url}" target="_blank" rel="noopener noreferrer" class="text-blue-400 underline text-xs">Открыть</a>
                     </div>
-                    <table class="w-full text-left border-collapse">
-                      <thead>
-                        <tr class="text-[10px] uppercase text-[#8B949E] bg-[#0D1117]">
-                          <th class="py-1.5 px-3">Сет</th>
-                          <th class="py-1.5 px-3 text-right">Рабочий вес</th>
-                          <th class="py-1.5 px-3 text-right">Повторения</th>
-                        </tr>
-                      </thead>
-                      <tbody>${setRowsHtml}</tbody>
-                    </table>
-                    ${ex.video_url ? `
-                      <div class="p-3 bg-[#0D1117] border-t border-[#10B981]/40 space-y-2">
-                        <div class="flex items-center justify-between text-xs">
-                          <span class="font-bold text-[#00E676] flex items-center gap-1.5">
-                            <i data-lucide="play-circle" class="w-4 h-4"></i>
-                            Видео подхода для разбора техники
-                          </span>
-                          <a href="${ex.video_url}" target="_blank" rel="noopener noreferrer" class="text-[11px] underline text-[#8B949E] hover:text-white">Открыть источник</a>
-                        </div>
-                        <div class="rounded-xl bg-[#090C10] border border-[#30363D] p-3 flex items-center justify-between">
-                          <div class="text-[11px] text-[#8B949E] truncate pr-2">${ex.video_url}</div>
-                          <button onclick="showToast('Воспроизведение видеозаписи подхода: ${ex.name}')" class="px-3 py-1.5 rounded-lg bg-[#10B981] text-[#090C10] text-xs font-extrabold shrink-0">▶ Смотреть</button>
-                        </div>
-                      </div>
-                    ` : ''}
+                    <div class="rounded-xl bg-[#090C10] border border-[#30363D] p-3 flex items-center justify-between">
+                      <div class="text-[11px] text-[#8B949E] truncate pr-2">${ex.video_url}</div>
+                      <button onclick="showToast('Воспроизведение видеозаписи подхода: ${ex.name}')" class="text-xs text-white bg-gray-800 px-2 py-1 rounded">Смотреть</button>
+                    </div>
                   </div>
-                `;
-              }).join('')}
-            </div>
+                ` : ''}
+              </div>
+            `).join('')}
+          </div>
 
             <div class="bg-[#161B22] border border-[#10B981]/60 rounded-2xl p-4 space-y-3 shadow-neon">
               <label class="block text-xs font-bold uppercase tracking-wider text-[#00E676]">Комментарий тренера к тренировке</label>
