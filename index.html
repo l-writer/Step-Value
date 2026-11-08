@@ -2396,7 +2396,22 @@ function renderOnboardingScreen() {
                 Сессия: ${formatDurationLabel(student.session_duration)}
               </span>
             </div>
-        
+            ${(() => {
+                const total = Math.max(0, Number(sub.total_sessions ?? sub.total ?? 0) || 0);
+                const activeCount = Array.isArray(student.active_bookings) ? student.active_bookings.length : 0;
+                const rem = Math.max(0, Math.min(total, Number(sub.remaining !== undefined ? sub.remaining : (total - activeCount))));
+                const percent = total > 0 ? Math.min(100, Math.round((rem / total) * 100)) : 0;
+                return `
+                <div class="mb-2.5">
+                  <h2 class="text-lg font-extrabold text-white">
+                    Тренировки: <span class="text-[#00E676]">${rem}</span> из ${total}
+                  </h2>
+                </div>
+                <div class="w-full h-2.5 bg-[#090C10] rounded-full overflow-hidden border border-[#30363D]/60 p-0.5">
+                  <div class="h-full bg-gradient-to-r from-[#10B981] to-[#00E676] rounded-full transition-all duration-500" style="width: ${percent}%;"></div>
+                </div>
+                `;
+              })()}
             <p class="text-[11px] text-[#8B949E] mt-2">
               <span>День счёта: ${sub.payment_day}-е число</span>
             </p>
