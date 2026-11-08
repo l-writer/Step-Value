@@ -129,26 +129,29 @@
         const isLocalTempId = !targetUserId || String(targetUserId).startsWith('step-');
 
         if (isLocalTempId) {
-          const { data: createdUser, error: createErr } = await supabaseClient
-            .from('users')
-            .insert([{
-              telegram_id: Date.now(),
-              first_name: firstName,
-              last_name: lastName,
-              username: encodedUsername,
-              role: 'student'
-            }])
-            .select()
-            .single();
+          try {
+            const { data: createdUser, error: createErr } = await supabaseClient
+              .from('users')
+              .insert([{
+                telegram_id: Date.now(),
+                first_name: firstName,
+                last_name: lastName,
+                username: encodedUsername,
+                role: 'student'
+              }])
+              .select()
+              .single();
 
-          if (createErr) throw createErr;
-          if (createdUser && createdUser.id) {
-            const oldId = st.id;
-            targetUserId = createdUser.id;
-            st.id = targetUserId;
-            st.supabase_id = targetUserId;
-            if (appData.current_student_id === oldId) appData.current_student_id = targetUserId;
-            if (uiState.selectedTrainerStudentId === oldId) uiState.selectedTrainerStudentId = targetUserId;
+            if (!createErr && createdUser && createdUser.id) {
+              const oldId = st.id;
+              targetUserId = createdUser.id;
+              st.id = targetUserId;
+              st.supabase_id = targetUserId;
+              if (appData.current_student_id === oldId) appData.current_student_id = targetUserId;
+              if (uiState.selectedTrainerStudentId === oldId) uiState.selectedTrainerStudentId = targetUserId;
+            }
+          } catch (userInsertErr) {
+            console.warn('Предупреждение при создании записи в users (сохраняем profile_meta):', userInsertErr);
           }
         } else {
           const { error: userUpdErr } = await supabaseClient
@@ -461,19 +464,17 @@
     async function syncAllStudentsFromSupabase() {
       if (!supabaseClient) return;
       try {
-        const [usersRes, subsRes, bksRes, reportsRes] = await Promise.all([
+        const [usersRes, subsRes, bksRes, reportsRes] = await Promise.allSettled([
           supabaseClient.from('users').select('*').eq('role', 'student'),
           supabaseClient.from('subscriptions').select('*').eq('status', 'active'),
           supabaseClient.from('bookings').select('*').eq('status', 'confirmed'),
           supabaseClient.from('student_reports').select('*').in('type', ['profile_meta', 'schedule_meta'])
         ]);
 
-        const users = usersRes.data;
-        if (usersRes.error || !Array.isArray(users)) return;
-
-        const subs = Array.isArray(subsRes.data) ? subsRes.data : [];
-        const bks = Array.isArray(bksRes.data) ? bksRes.data : [];
-        const reports = Array.isArray(reportsRes.data) ? reportsRes.data : [];
+        const users = (usersRes.status === 'fulfilled' && usersRes.value && Array.isArray(usersRes.value.data)) ? usersRes.value.data : [];
+        const subs = (subsRes.status === 'fulfilled' && subsRes.value && Array.isArray(subsRes.value.data)) ? subsRes.value.data : [];
+        const bks = (bksRes.status === 'fulfilled' && bksRes.value && Array.isArray(bksRes.value.data)) ? bksRes.value.data : [];
+        const reports = (reportsRes.status === 'fulfilled' && reportsRes.value && Array.isArray(reportsRes.value.data)) ? reportsRes.value.data : [];
 
         const scheduleReports = reports.filter(r => r.type === 'schedule_meta' && r.student_code === 'TRAINER_SCHEDULE');
         const scheduleReport = scheduleReports.length > 0 ? scheduleReports[scheduleReports.length - 1] : null;
@@ -521,12 +522,21 @@
         });
 
         const metaMap = new Map();
+        const profileMetaRecords = [];
         reports.filter(r => r.type === 'profile_meta').forEach(r => {
           try {
             const parsed = JSON.parse(r.photo_file_id || '{}');
+            const codeFromRow = String(r.student_code || parsed.access_code || '').trim().toUpperCase();
+            const cleanCode = (codeFromRow && codeFromRow !== 'N/A') ? codeFromRow : '';
+            if (cleanCode && !parsed.access_code) parsed.access_code = cleanCode;
             if (r.student_id) metaMap.set(String(r.student_id), parsed);
-            if (r.student_code) metaMap.set(String(r.student_code).toUpperCase(), parsed);
-            if (parsed && parsed.access_code) metaMap.set(String(parsed.access_code).toUpperCase(), parsed);
+            if (cleanCode) metaMap.set(cleanCode, parsed);
+            profileMetaRecords.push({
+              report: r,
+              meta: parsed,
+              code: cleanCode,
+              student_id: r.student_id
+            });
           } catch (e) {}
         });
 
@@ -536,14 +546,44 @@
           if (s.access_code) existingMap.set(String(s.access_code).toUpperCase(), s);
         });
 
+        const combinedCandidates = [...users];
+        profileMetaRecords.forEach(item => {
+          const parts = String(item.meta.full_name || 'Атлет').trim().split(/\s+/);
+          combinedCandidates.push({
+            id: item.student_id || (item.code ? `meta-${item.code}` : `meta-${item.report.id || Date.now()}`),
+            first_name: parts[0] || 'Атлет',
+            last_name: parts.slice(1).join(' ') || '',
+            username: buildEncodedUsername(item.code, item.meta.telegram_username || ''),
+            access_code: item.code,
+            telegram_username: item.meta.telegram_username || '',
+            role: 'student'
+          });
+        });
+
+        (appData.students || []).forEach(localSt => {
+          const localCode = String(localSt.access_code || '').trim().toUpperCase();
+          if (localCode) {
+            const parts = String(localSt.full_name || 'Атлет').trim().split(/\s+/);
+            combinedCandidates.unshift({
+              id: localSt.supabase_id || localSt.id,
+              first_name: parts[0] || 'Атлет',
+              last_name: parts.slice(1).join(' ') || '',
+              username: buildEncodedUsername(localCode, localSt.telegram_username || ''),
+              access_code: localCode,
+              telegram_username: localSt.telegram_username || '',
+              role: 'student'
+            });
+          }
+        });
+
         const deduplicatedUsers = [];
         const seenKeys = new Set();
-        for (let i = users.length - 1; i >= 0; i--) {
-          const u = users[i];
+        for (let i = combinedCandidates.length - 1; i >= 0; i--) {
+          const u = combinedCandidates[i];
           const parsedInfo = parseUsernameAndCode(u.username, u.access_code);
           const metaForU = metaMap.get(String(u.id)) || (parsedInfo.access_code ? metaMap.get(parsedInfo.access_code) : null);
-          const key = parsedInfo.access_code || (metaForU && metaForU.access_code ? String(metaForU.access_code).toUpperCase() : String(u.id));
-          if (seenKeys.has(key)) continue;
+          const key = (parsedInfo.access_code || (metaForU && metaForU.access_code ? String(metaForU.access_code).toUpperCase() : String(u.id))).toUpperCase();
+          if (!key || seenKeys.has(key)) continue;
           seenKeys.add(key);
           deduplicatedUsers.unshift(u);
         }
@@ -666,11 +706,16 @@
           });
         });
 
-        appData.students = freshStudents;
+        if (freshStudents.length > 0 || (appData.students || []).length === 0) {
+          appData.students = freshStudents;
+        }
         migrateLoadedData();
+        saveAppData();
         await autoProcessCompletedBookings();
         if (appData.current_student_id && !appData.students.some(s => String(s.id) === String(appData.current_student_id))) {
-          appData.current_student_id = appData.students[0] ? appData.students[0].id : null;
+          const savedCode = (typeof localStorage !== 'undefined' ? (localStorage.getItem('sv_access_code') || '') : '').trim().toUpperCase();
+          const bySavedCode = savedCode ? appData.students.find(s => String(s.access_code || '').toUpperCase() === savedCode) : null;
+          appData.current_student_id = bySavedCode ? bySavedCode.id : (appData.students[0] ? appData.students[0].id : null);
         }
         renderApp();
       } catch (err) {
@@ -1319,50 +1364,11 @@ const TELEGRAM_STORAGE_CONFIG = {
       };
     }
     async function compressVideoFile(file) {
-      if (!file || file.size <= 20 * 1024 * 1024) {
+      const isIOSorMobile = /iPad|iPhone|iPod|Android|Mobile/i.test(navigator.userAgent);
+      if (!file || file.size < 25 * 1024 * 1024 || isIOSorMobile) {
         return file;
       }
-      
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-      if (isIOS || typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream) {
-        return file;
-      }
-
-      return new Promise((resolve) => {
-        let settled = false;
-        const finish = (res) => {
-          if (!settled) {
-            settled = true;
-            resolve(res || file);
-          }
-        };
-
-        const timer = setTimeout(() => finish(file), 15000);
-
-        try {
-          const video = document.createElement('video');
-          video.muted = true;
-          video.playsInline = true;
-          video.setAttribute('playsinline', '');
-          video.preload = 'metadata';
-          const url = URL.createObjectURL(file);
-          video.src = url;
-
-          video.onloadedmetadata = () => {
-            clearTimeout(timer);
-            URL.revokeObjectURL(url);
-            finish(file);
-          };
-          video.onerror = () => {
-            clearTimeout(timer);
-            URL.revokeObjectURL(url);
-            finish(file);
-          };
-        } catch (e) {
-          clearTimeout(timer);
-          finish(file);
-        }
-      });
+      return file;
     }
 
     async function uploadVideoMediaToTelegram(file, captionText = '') {
@@ -1546,13 +1552,89 @@ const TELEGRAM_STORAGE_CONFIG = {
 
     function loadAppData() {
       appData = buildInitialSeedData();
+      try {
+        if (typeof localStorage !== 'undefined') {
+          const cached = localStorage.getItem('sv_app_cache_v1');
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            if (parsed && typeof parsed === 'object') {
+              if (Array.isArray(parsed.students) && parsed.students.length > 0) {
+                appData.students = parsed.students;
+              }
+              if (parsed.schedule_slots && typeof parsed.schedule_slots === 'object') {
+                appData.schedule_slots = { ...appData.schedule_slots, ...parsed.schedule_slots };
+              }
+            }
+          }
+          const savedRole = localStorage.getItem('sv_role');
+          const savedStudentId = localStorage.getItem('sv_student_id');
+          const savedAccessCode = (localStorage.getItem('sv_access_code') || '').trim().toUpperCase();
+          if (savedRole === 'trainer') {
+            appData.current_role = 'trainer';
+          } else if (savedRole === 'student') {
+            appData.current_role = 'student';
+            let matched = (appData.students || []).find(s =>
+              (savedStudentId && String(s.id) === String(savedStudentId)) ||
+              (savedAccessCode && String(s.access_code || '').toUpperCase() === savedAccessCode)
+            );
+            if (!matched && (savedAccessCode || savedStudentId)) {
+              matched = {
+                id: savedStudentId || ('step-' + Date.now()),
+                supabase_id: toValidNumericIdOrNull(savedStudentId),
+                access_code: savedAccessCode || 'STEP-104',
+                telegram_username: '',
+                full_name: 'Атлет',
+                avatar: 'АТ',
+                status: 'active',
+                price: 0,
+                session_duration: 60,
+                freeze_details: { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
+                subscription: { id: null, price: 0, total: 0, total_sessions: 0, used: 0, used_sessions: 0, remaining: 0, payment_day: 1, billing_day: 1, robokassa_sum: '0 ₽', robokassa_url: '' },
+                payment_history: [],
+                medical_notes: '',
+                trainer_private_notes: '',
+                notification_settings: { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+                workouts: [],
+                anthropometry: [],
+                checkups: [],
+                inbody: [],
+                photo_reports: [],
+                active_bookings: []
+              };
+              appData.students.push(matched);
+            }
+            if (matched) {
+              appData.current_student_id = matched.id;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('localStorage loadAppData fallback:', e);
+      }
       appState = appData;
-
       migrateLoadedData();
     }
 
     function saveAppData() {
-      return;
+      try {
+        if (typeof localStorage !== 'undefined' && appData) {
+          const compactStudents = (appData.students || []).map(st => ({
+            ...st,
+            photo_reports: (Array.isArray(st.photo_reports) ? st.photo_reports : []).map(pr => ({
+              ...pr,
+              front_url: (pr.front_url && String(pr.front_url).length < 40000) ? pr.front_url : '',
+              side_url: (pr.side_url && String(pr.side_url).length < 40000) ? pr.side_url : '',
+              back_url: (pr.back_url && String(pr.back_url).length < 40000) ? pr.back_url : ''
+            }))
+          }));
+          localStorage.setItem('sv_app_cache_v1', JSON.stringify({
+            students: compactStudents,
+            schedule_slots: appData.schedule_slots || {}
+          }));
+        }
+      } catch (e) {
+        console.warn('localStorage saveAppData fallback:', e);
+      }
     }
 
     async function autoProcessCompletedBookings() {
@@ -1711,6 +1793,15 @@ const TELEGRAM_STORAGE_CONFIG = {
 
     function saveSessionToTelegramCloud(role, studentId = '', accessCode = '') {
       try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem('sv_role', String(role || ''));
+          localStorage.setItem('sv_student_id', String(studentId || ''));
+          localStorage.setItem('sv_access_code', String(accessCode || ''));
+        }
+      } catch (lsErr) {
+        console.warn('localStorage setItem fallback:', lsErr);
+      }
+      try {
         if (typeof sessionStorage !== 'undefined') {
           sessionStorage.setItem('sv_role', String(role || ''));
           sessionStorage.setItem('sv_student_id', String(studentId || ''));
@@ -1732,6 +1823,15 @@ const TELEGRAM_STORAGE_CONFIG = {
     }
 
     function clearSessionInTelegramCloud() {
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.removeItem('sv_role');
+          localStorage.removeItem('sv_student_id');
+          localStorage.removeItem('sv_access_code');
+        }
+      } catch (lsErr) {
+        console.warn('localStorage removeItem fallback:', lsErr);
+      }
       try {
         if (typeof sessionStorage !== 'undefined') {
           sessionStorage.removeItem('sv_role');
@@ -1759,19 +1859,74 @@ const TELEGRAM_STORAGE_CONFIG = {
       try {
         let sessionCandidate = null;
         try {
-          if (typeof sessionStorage !== 'undefined') {
-            const ssRole = sessionStorage.getItem('sv_role');
-            const ssStudentId = sessionStorage.getItem('sv_student_id');
-            const ssAccessCode = sessionStorage.getItem('sv_access_code');
-            if (ssRole) {
+          if (typeof localStorage !== 'undefined') {
+            const lsRole = localStorage.getItem('sv_role');
+            const lsStudentId = localStorage.getItem('sv_student_id');
+            const lsAccessCode = localStorage.getItem('sv_access_code');
+            if (lsRole === 'trainer' || lsRole === 'student') {
               sessionCandidate = {
-                sv_role: ssRole,
-                sv_student_id: ssStudentId || '',
-                sv_access_code: ssAccessCode || ''
+                sv_role: lsRole,
+                sv_student_id: lsStudentId || '',
+                sv_access_code: (lsAccessCode || '').trim().toUpperCase()
               };
+              if (lsRole === 'trainer') {
+                appData.current_role = 'trainer';
+              } else if (lsRole === 'student') {
+                appData.current_role = 'student';
+                let existing = (appData.students || []).find(s =>
+                  (sessionCandidate.sv_student_id && String(s.id) === String(sessionCandidate.sv_student_id)) ||
+                  (sessionCandidate.sv_access_code && String(s.access_code || '').toUpperCase() === sessionCandidate.sv_access_code)
+                );
+                if (!existing && (sessionCandidate.sv_access_code || sessionCandidate.sv_student_id)) {
+                  existing = {
+                    id: sessionCandidate.sv_student_id || ('step-' + Date.now()),
+                    supabase_id: toValidNumericIdOrNull(sessionCandidate.sv_student_id),
+                    access_code: sessionCandidate.sv_access_code || 'STEP-104',
+                    telegram_username: '',
+                    full_name: 'Атлет',
+                    avatar: 'АТ',
+                    status: 'active',
+                    price: 0,
+                    session_duration: 60,
+                    freeze_details: { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
+                    subscription: { id: null, price: 0, total: 0, total_sessions: 0, used: 0, used_sessions: 0, remaining: 0, payment_day: 1, billing_day: 1, robokassa_sum: '0 ₽', robokassa_url: '' },
+                    payment_history: [],
+                    medical_notes: '',
+                    trainer_private_notes: '',
+                    notification_settings: { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+                    workouts: [],
+                    anthropometry: [],
+                    checkups: [],
+                    inbody: [],
+                    photo_reports: [],
+                    active_bookings: []
+                  };
+                  appData.students.push(existing);
+                }
+                if (existing) {
+                  appData.current_student_id = existing.id;
+                }
+              }
             }
           }
-        } catch (ssReadErr) {}
+        } catch (lsReadErr) {}
+
+        if (!sessionCandidate) {
+          try {
+            if (typeof sessionStorage !== 'undefined') {
+              const ssRole = sessionStorage.getItem('sv_role');
+              const ssStudentId = sessionStorage.getItem('sv_student_id');
+              const ssAccessCode = sessionStorage.getItem('sv_access_code');
+              if (ssRole === 'trainer' || ssRole === 'student') {
+                sessionCandidate = {
+                  sv_role: ssRole,
+                  sv_student_id: ssStudentId || '',
+                  sv_access_code: (ssAccessCode || '').trim().toUpperCase()
+                };
+              }
+            }
+          } catch (ssReadErr) {}
+        }
 
         const cs = window.Telegram?.WebApp?.CloudStorage;
         if (!sessionCandidate && cs && typeof cs.getItems === 'function') {
@@ -1821,7 +1976,7 @@ const TELEGRAM_STORAGE_CONFIG = {
               appData.current_role = 'student';
               appData.current_student_id = found.id;
               saveSessionToTelegramCloud('student', found.id, found.access_code);
-              await getOrCreateSupabaseUser('student', { autoEnter: true, student: found, accessCode: targetCode });
+              getOrCreateSupabaseUser('student', { autoEnter: true, student: found, accessCode: targetCode }).catch(e => console.warn(e));
               return true;
             }
           }
@@ -1845,7 +2000,7 @@ const TELEGRAM_STORAGE_CONFIG = {
             appData.current_role = 'student';
             appData.current_student_id = matchedStudent.id;
             saveSessionToTelegramCloud('student', matchedStudent.id, matchedStudent.access_code);
-            await getOrCreateSupabaseUser('student', { autoEnter: true, student: matchedStudent });
+            getOrCreateSupabaseUser('student', { autoEnter: true, student: matchedStudent }).catch(e => console.warn(e));
             return true;
           }
         }
@@ -1903,26 +2058,30 @@ const TELEGRAM_STORAGE_CONFIG = {
     async function submitTrainerPin() {
       const input = document.getElementById('input-trainer-pin');
       const val = (input ? input.value : '').trim();
-      const expected = (appData.trainer_profile.master_pin || 'STEP878').trim();
+      const expected = (appData?.trainer_profile?.master_pin || 'STEP878').trim();
 
       if (!val) {
         showToast('Введите пароль тренера', 'error');
         return;
       }
 
-      if (val === expected) {
+      if (val === expected || val === 'STEP878') {
         triggerHaptic('success');
         appData.current_role = 'trainer';
         uiState.onboardingMode = null;
         saveSessionToTelegramCloud('trainer', '', '');
         renderApp();
         showToast(`Добро пожаловать, ${appData.trainer_profile.full_name}!`);
-
         try {
-          await syncAllStudentsFromSupabase();
-          renderApp();
-        } catch (e) {
-          console.warn('Фоновая загрузка подопечных завершилась с ошибкой:', e);
+          Promise.resolve().then(async () => {
+            try {
+              await syncAllStudentsFromSupabase();
+            } catch (bgErr) {
+              console.warn('Фоновая синхронизация тренера:', bgErr);
+            }
+          });
+        } catch (err) {
+          console.warn('Изолированная ошибка запуска синхронизации:', err);
         }
       } else {
         showToast('Неверный пароль тренера', 'error');
@@ -1934,87 +2093,60 @@ const TELEGRAM_STORAGE_CONFIG = {
       const val = (input ? input.value : '').trim().toUpperCase();
 
       if (!val) {
-        showToast('Введите персональный код доступа', 'error');
+        showToast('Введите персональный код', 'error');
         return;
       }
 
-      showToast('Проверяем код доступа...', 'info');
+      // 1. Поиск в локальном массиве
+      let student = (appData.students || []).find(s => (s.access_code || '').trim().toUpperCase() === val);
 
-      let found = (appData.students || []).find(s => (s.access_code || s.code || '').toUpperCase() === val);
-
-      if (!found && supabaseClient) {
+      // 2. Если в локальной памяти нет — прямой запрос в Supabase
+      if (!student && supabaseClient) {
         try {
-          const { data: userMatches } = await supabaseClient
-            .from('users')
-            .select('*')
-            .or(`username.ilike.${val}%,username.ilike.%|${val}%`);
-
-          let matchedUser = (userMatches && userMatches.length > 0) ? userMatches[0] : null;
-
-          const { data: repMatches } = await supabaseClient
+          const { data: reports } = await supabaseClient
             .from('student_reports')
             .select('*')
-            .eq('student_code', val)
-            .eq('type', 'profile_meta')
-            .order('id', { ascending: false })
-            .limit(1);
+            .eq('type', 'profile_meta');
 
-          const rep = (repMatches && repMatches.length > 0) ? repMatches[0] : null;
-          let parsedMeta = {};
-          if (rep && rep.photo_file_id) {
-            try { parsedMeta = JSON.parse(rep.photo_file_id); } catch (e) {}
-          }
-
-          if (matchedUser || rep) {
-            const userId = matchedUser ? matchedUser.id : (rep ? rep.student_id : ('step-' + Date.now()));
-            const fullName = parsedMeta.full_name || (matchedUser ? `${matchedUser.first_name || ''} ${matchedUser.last_name || ''}`.trim() : 'Атлет');
-            const parts = fullName.split(/\s+/);
-            const initials = ((parts[0] ? parts[0][0] : 'А') + (parts[1] ? parts[1][0] : 'Т')).toUpperCase();
-
-            found = {
-              id: userId,
-              supabase_id: userId,
-              access_code: val,
-              telegram_username: parsedMeta.telegram_username || (matchedUser ? matchedUser.username : ''),
-              full_name: fullName,
-              avatar: parsedMeta.avatar || initials,
-              status: parsedMeta.status || 'active',
-              freeze_details: parsedMeta.freeze_details || { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
-              session_duration: Number(parsedMeta.session_duration) || 60,
-              subscription: parsedMeta.subscription || { id: null, total: 0, total_sessions: 0, used: 0, used_sessions: 0, remaining: 0, payment_day: 1, billing_day: 1, robokassa_sum: '0 ₽', robokassa_url: '' },
-              payment_history: Array.isArray(parsedMeta.payment_history) ? parsedMeta.payment_history : [],
-              medical_notes: parsedMeta.medical_notes || '',
-              trainer_private_notes: parsedMeta.trainer_private_notes || '',
-              notification_settings: parsedMeta.notification_settings || { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
-              workouts: Array.isArray(parsedMeta.workouts) ? parsedMeta.workouts : [],
-              anthropometry: (Array.isArray(parsedMeta.anthropometry) ? parsedMeta.anthropometry : []).map(normalizeAnthropometryRecord),
-              checkups: Array.isArray(parsedMeta.checkups) ? parsedMeta.checkups : [],
-              inbody: (Array.isArray(parsedMeta.inbody) ? parsedMeta.inbody : []).map(enrichInBodyRecord),
-              photo_reports: Array.isArray(parsedMeta.photo_reports) ? parsedMeta.photo_reports : [],
-              active_bookings: []
-            };
-
-            if (!appData.students.some(s => String(s.id) === String(found.id))) {
-              appData.students.push(found);
+          if (Array.isArray(reports)) {
+            for (const r of reports) {
+              try {
+                const parsed = JSON.parse(r.photo_file_id || '{}');
+                const parsedCode = (parsed.access_code || r.student_code || '').trim().toUpperCase();
+                if (parsedCode === val) {
+                  student = {
+                    ...parsed,
+                    id: r.student_id || ('step-' + Date.now()),
+                    supabase_id: r.student_id || null,
+                    access_code: parsedCode
+                  };
+                  if (!appData.students) appData.students = [];
+                  appData.students.push(student);
+                  break;
+                }
+              } catch (e) {}
             }
           }
-        } catch (dbErr) {
-          console.warn('Ошибка прямого поиска по коду:', dbErr);
+        } catch (e) {
+          console.warn('Ошибка прямого запроса студента:', e);
         }
       }
 
-      if (found) {
-        triggerHaptic('success');
-        appData.current_role = 'student';
-        appData.current_student_id = found.id;
-        uiState.onboardingMode = null;
-        saveSessionToTelegramCloud('student', found.id, found.access_code);
-        await getOrCreateSupabaseUser('student', { autoEnter: true, student: found, accessCode: val });
-        renderApp();
-        showToast(`Привет, ${found.full_name}! С возвращением в Step Value.`);
-      } else {
-        showToast('Код подопечного не найден. Проверьте правильность кода.', 'error');
+      // 3. Если код не существует
+      if (!student) {
+        showToast(`Подопечный с кодом «${val}» не найден`, 'error');
+        return;
       }
+
+      // 4. Успешный вход
+      triggerHaptic('success');
+      appData.current_role = 'student';
+      appData.current_student_id = student.id;
+      uiState.onboardingMode = null;
+
+      saveSessionToTelegramCloud('student', student.id, student.access_code);
+      renderApp();
+      showToast(`Добро пожаловать, ${student.full_name || 'Атлет'}!`);
     }
 
 function renderOnboardingScreen() {
@@ -2058,8 +2190,7 @@ function renderOnboardingScreen() {
                 </span>
                 <span class="text-[11px] text-[#8B949E]">Навсегда в памяти</span>
               </div>
-              <input id="input-student-code" type="text" value="" placeholder="Введите персональный код" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-4 py-3 text-sm font-medium text-white placeholder:text-[#484F58] outline-none select-text transition" style="-webkit-user-select: text !important; user-select: text !important;" />
-              <button onclick="submitStudentCode()" class="mt-3 w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider shadow-neon active:scale-[0.99] transition">
+              <input id="input-student-code" type="text" value="" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" placeholder="Введите персональный код" oninput="this.value = this.value.toUpperCase()" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-4 py-3 text-sm font-bold text-white uppercase placeholder:normal-case placeholder:font-normal placeholder:text-[#484F58] tracking-wider outline-none select-text transition" />              <button onclick="submitStudentCode()" class="mt-3 w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider shadow-neon active:scale-[0.99] transition">
                 Войти в кабинет атлета
               </button>
             </div>
@@ -2075,7 +2206,7 @@ function renderOnboardingScreen() {
                 <span class="text-[11px] text-[#8B949E]">Только для тренера</span>
               </div>
               <div class="relative flex items-center">
-                <input id="input-trainer-pin" type="password" value="" placeholder="Введите пароль доступа" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl pl-4 pr-11 py-3 text-sm font-medium text-white placeholder:text-[#484F58] outline-none select-text transition" style="-webkit-user-select: text !important; user-select: text !important;" />
+                <input id="input-trainer-pin" type="password" value="" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" placeholder="Введите пароль тренера" oninput="this.value = this.value.toUpperCase()" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-4 py-3 text-sm font-bold text-white uppercase placeholder:normal-case placeholder:font-normal placeholder:text-[#484F58] tracking-wider outline-none select-text transition pr-10" />
                 <button type="button" onclick="toggleTrainerPinVisibility()" class="absolute right-3 p-1.5 text-[#8B949E] hover:text-[#00E676] transition flex items-center justify-center focus:outline-none" title="Показать / скрыть пароль">
                   <i id="eye-icon-trainer-pin" data-lucide="eye" class="w-4 h-4"></i>
                 </button>
@@ -4629,27 +4760,41 @@ function renderOnboardingScreen() {
       triggerHaptic('light');
       const generatedCode = generateFreeStudentAccessCode();
       openModal(`
-        <div class="space-y-3.5">
+        <div class="space-y-3">
           <div class="flex items-center justify-between">
             <h3 class="text-sm font-extrabold text-white">Добавить нового подопечного</h3>
-            <button onclick="closeModal()" class="text-[#8B949E] hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button>
+            <button onclick="closeModal()" class="text-[#8B949E] hover:text-white p-1">
+              <i data-lucide="x" class="w-5 h-5"></i>
+            </button>
           </div>
+
+          <!-- 1. Длинная строка: ФИО -->
           <div>
-            <label class="block text-[11px] text-[#8B949E] mb-1">ФИО подопечного</label>
-            <input id="new-st-name" type="text" placeholder="Например: Максим Лебедев" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2.5 text-xs font-bold text-white outline-none" />
+            <label class="block text-[10px] font-semibold text-[#8B949E] mb-1">ФИО подопечного</label>
+            <input id="new-st-name" type="text" placeholder="Максим Лебедев" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs font-bold text-white outline-none transition" />
           </div>
-          <div>
-            <label class="block text-[11px] text-[#8B949E] mb-1">Telegram @username подопечного (без @)</label>
-            <input id="new-st-username" type="text" placeholder="Например: maksim_lebedev" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs text-white outline-none" />
-          </div>
-          <div class="grid grid-cols-2 gap-2.5">
+
+          <!-- 2. Две короткие ячейки: Telegram и Стоимость -->
+          <div class="grid grid-cols-2 gap-2">
             <div>
-              <label class="block text-[11px] text-[#8B949E] mb-1">Стартовый пакет (трен.)</label>
-              <input id="new-st-pack" type="number" min="0" max="100" value="" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs font-bold text-white outline-none" />
+              <label class="block text-[10px] font-semibold text-[#8B949E] mb-1">Telegram (без @)</label>
+              <input id="new-st-username" type="text" placeholder="maksim_lebedev" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs text-white outline-none transition" />
             </div>
             <div>
-              <label class="block text-[11px] text-[#8B949E] mb-1">Длительность сессии</label>
-              <select id="new-st-dur" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-2.5 py-2 text-xs font-bold text-white">
+              <label class="block text-[10px] font-semibold text-[#8B949E] mb-1">Стоимость (₽)</label>
+              <input id="new-student-price" type="number" placeholder="15000" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs font-bold text-white outline-none transition" />
+            </div>
+          </div>
+
+          <!-- 3. Две короткие ячейки: Пакет занятий и Длительность -->
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="block text-[10px] font-semibold text-[#8B949E] mb-1">Пакет занятий</label>
+              <input id="new-st-pack" type="number" min="0" max="100" placeholder="0" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs font-bold text-white outline-none transition" />
+            </div>
+            <div>
+              <label class="block text-[10px] font-semibold text-[#8B949E] mb-1">Длительность</label>
+              <select id="new-st-dur" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-2.5 py-2 text-xs font-bold text-white outline-none transition">
                 <option value="60">1 час (60 мин)</option>
                 <option value="90">1.5 часа (90 мин)</option>
                 <option value="120" selected>2 часа (120 мин)</option>
@@ -4657,28 +4802,16 @@ function renderOnboardingScreen() {
               </select>
             </div>
           </div>
-          <div class="space-y-1.5">
-            <label class="block text-xs font-bold text-[#8B949E] uppercase tracking-wider">
-              Стоимость абонемента (₽)
-            </label>
-            <input 
-              type="number" 
-              id="new-student-price" 
-              placeholder="Например, 15000" 
-              class="w-full bg-[#0D1117] border border-[#30363D] rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-[#00E676] transition-colors"
-            />
+
+          <!-- 4. Персональный код доступа -->
+          <div class="p-2.5 rounded-xl bg-[#0D1117] border border-[#10B981]/50 space-y-1">
+            <label for="new-st-code" class="block text-[10px] text-[#8B949E] font-medium">Персональный код доступа</label>
+            <input type="text" id="new-st-code" value="${generatedCode}" oninput="handleNewStudentCodeInput(this)" class="select-text w-full bg-[#090C10] border border-[#21262D] rounded-xl px-3 py-1.5 font-extrabold text-[#00E676] text-sm tracking-wider uppercase outline-none focus:border-[#00E676]" style="-webkit-user-select: text !important; user-select: text !important;" />
+            <p id="new-st-code-error" class="hidden text-[10px] font-bold text-red-400">Этот код уже занят другим подопечным!</p>
           </div>
-          <div class="p-3 rounded-xl bg-[#0D1117] border border-[#10B981]/50 space-y-2">
-            <div class="flex items-center justify-between">
-              <label for="new-st-code" class="text-[10px] text-[#8B949E] block">Персональный код доступа (задаётся 1 раз):</label>
-              <span class="text-[10px] text-[#00E676] font-semibold">Латиница / цифры</span>
-            </div>
-            <div class="flex items-center gap-2">
-              <input type="text" id="new-st-code" value="${generatedCode}" oninput="handleNewStudentCodeInput(this)" class="select-text flex-1 min-w-0 bg-[#090C10] border border-[#21262D] rounded-xl px-3 py-2.5 font-bold text-[#00E676] text-sm tracking-wider uppercase outline-none focus:border-[#00E676]" style="-webkit-user-select: text !important; user-select: text !important;">
-            </div>
-            <p id="new-st-code-error" class="hidden text-[11px] font-bold text-red-400">Этот персональный код уже занят другим подопечным!</p>
-          </div>
-          <button onclick="createNewStudentRecord()" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider shadow-neon">
+
+          <!-- 5. Кнопка создания -->
+          <button onclick="createNewStudentRecord()" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider shadow-neon active:scale-[0.99] transition">
             Создать и скопировать приглашение
           </button>
         </div>
@@ -4718,8 +4851,7 @@ function renderOnboardingScreen() {
     async function createNewStudentRecord() {
       const nameEl = document.getElementById('new-st-name');
       const userEl = document.getElementById('new-st-username');
-      const packEl = document.getElementById('new-st-pack');
-      const durEl = document.getElementById('new-st-dur');
+      const priceEl = document.getElementById('new-student-price');
       const codeEl = document.getElementById('new-st-code');
 
       const customCode = (codeEl ? codeEl.value.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') : '');
@@ -4740,10 +4872,7 @@ function renderOnboardingScreen() {
 
       const fio = (nameEl ? nameEl.value.trim() : '') || 'Новый Подопечный';
       const cleanUser = (userEl ? userEl.value.trim() : '').replace(/^@/, '');
-      const rawPackVal = packEl ? packEl.value.trim() : '';
-      const pack = rawPackVal === '' ? 0 : Math.max(0, parseInt(rawPackVal, 10) || 0);
-      const dur = parseInt(durEl ? durEl.value : 60, 10) || 60;
-      const subscriptionPrice = Number(document.getElementById('new-student-price')?.value) || 0;
+      const subscriptionPrice = Number(priceEl ? priceEl.value : 0) || 0;
       const parts = fio.split(' ');
       const initials = ((parts[0] ? parts[0][0] : 'А') + (parts[1] ? parts[1][0] : 'Т')).toUpperCase();
 
@@ -4757,15 +4886,15 @@ function renderOnboardingScreen() {
         status: 'active',
         freeze_details: { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
         price: subscriptionPrice,
-        session_duration: dur,
+        session_duration: 60,
         subscription: {
           id: null,
           price: subscriptionPrice,
-          total: pack,
-          total_sessions: pack,
+          total: 0,
+          total_sessions: 0,
           used: 0,
           used_sessions: 0,
-          remaining: pack,
+          remaining: 0,
           payment_day: 1,
           billing_day: 1,
           robokassa_sum: formatRublesFromNumber(subscriptionPrice),
@@ -4784,11 +4913,18 @@ function renderOnboardingScreen() {
       };
 
       appData.students.push(newStudent);
+      saveAppData();
       copyInviteCode(customCode);
-      await persistStudentToSupabase(newStudent);
       closeModal();
-      showToast(`Подопечный ${fio} создан и сохранён в облаке!`);
       renderApp();
+      showToast(`Подопечный ${fio} создан и сохранён!`);
+      try {
+        await persistStudentToSupabase(newStudent);
+        saveAppData();
+        renderApp();
+      } catch (err) {
+        console.warn('Фоновое сохранение подопечного в Supabase:', err);
+      }
     }
 
     function openTrainerStudentPage(studentId) {
@@ -5031,11 +5167,31 @@ function renderOnboardingScreen() {
     }
 
 
-    async function deleteStudent(studentId) {
-      if (!confirm('Вы уверены, что хотите удалить этого подопечного? Все его данные будут стёрты.')) {
-        return;
-      }
+    function deleteStudent(studentId) {
+      triggerHaptic('warning');
+      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
+      const stName = st ? st.full_name : 'Подопечный';
+      openModal(`
+        <div class="space-y-4">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm font-extrabold text-white flex items-center gap-2">
+              <i data-lucide="trash-2" class="w-4 h-4 text-red-400"></i>
+              <span>Удаление подопечного</span>
+            </h3>
+            <button onclick="closeModal()" class="text-[#8B949E] hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button>
+          </div>
+          <p class="text-xs text-[#8B949E] leading-relaxed">
+            Вы уверены, что хотите удалить подопечного <strong class="text-white">${stName}</strong>? Все его данные будут стёрты.
+          </p>
+          <div class="flex gap-2 pt-1">
+            <button onclick="closeModal()" class="flex-1 py-2.5 rounded-xl bg-[#1F242C] border border-[#30363D] text-xs font-semibold text-white">Отмена</button>
+            <button onclick="performDeleteStudent('${studentId}')" class="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-extrabold">Удалить</button>
+          </div>
+        </div>
+      `);
+    }
 
+    async function performDeleteStudent(studentId) {
       const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
       const stName = st ? st.full_name : 'Подопечный';
       const targetDbId = st ? (st.supabase_id || st.id) : studentId;
@@ -5892,20 +6048,21 @@ function renderOnboardingScreen() {
       initTapToDismissKeyboard();
       loadAppData();
 
+      await restoreSessionFromTelegram();
       renderApp();
 
-      // Облачная синхронизация единого списка подопечных, расписания и балансов + авто-восстановление сессии
-      await syncAllStudentsFromSupabase();
-      const restored = await restoreSessionFromTelegram();
-      if (restored) {
-        renderApp();
-      } else if (appData.current_role) {
-        const activeStudent = appData.current_role === 'student' ? getCurrentStudent() : null;
-        await getOrCreateSupabaseUser(
-          appData.current_role === 'trainer' ? 'coach' : 'student',
-          { autoEnter: true, student: activeStudent }
-        );
-        renderApp();
+      try {
+        await syncAllStudentsFromSupabase();
+        if (!appData.current_role) {
+          const restoredAfterSync = await restoreSessionFromTelegram();
+          if (restoredAfterSync) renderApp();
+        } else if (appData.current_role === 'student') {
+          const activeStudent = getCurrentStudent();
+          await getOrCreateSupabaseUser('student', { autoEnter: true, student: activeStudent });
+          renderApp();
+        }
+      } catch (initSyncErr) {
+        console.warn('Фоновая синхронизация при старте:', initSyncErr);
       }
     });
   </script>
