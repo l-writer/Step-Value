@@ -67,6 +67,14 @@
       return cleanTg;
     }
 
+    function toValidNumericIdOrNull(rawId) {
+      if (rawId === null || rawId === undefined || rawId === '') return null;
+      const str = String(rawId).trim();
+      if (str.startsWith('step-') || str.startsWith('bk-') || str.startsWith('w-')) return null;
+      const num = Number(str);
+      return Number.isInteger(num) && num > 0 ? num : null;
+    }
+
     async function persistScheduleSlotsToSupabase() {
       if (!supabaseClient || !appData || !appData.schedule_slots) return false;
       try {
@@ -74,8 +82,9 @@
         Object.keys(appData.schedule_slots).forEach(dateKey => {
           compactSchedule[dateKey] = (appData.schedule_slots[dateKey] || []).map(s => ({
             time: s.time,
-            duration: s.duration || 60,
+            duration: Number(s.duration) || 60,
             is_open: Boolean(s.is_open),
+            baseline_closed: Boolean(s.baseline_closed),
             booked_by: s.booked_by || null
           }));
         });
@@ -85,10 +94,11 @@
           .eq('type', 'schedule_meta')
           .eq('student_code', 'TRAINER_SCHEDULE');
 
+        const safeNumericStudentId = toValidNumericIdOrNull(currentUser && currentUser.id);
         await supabaseClient
           .from('student_reports')
           .insert([{
-            student_id: (currentUser && currentUser.id) ? currentUser.id : null,
+            student_id: safeNumericStudentId,
             student_code: 'TRAINER_SCHEDULE',
             type: 'schedule_meta',
             photo_file_id: JSON.stringify(compactSchedule),
@@ -171,76 +181,97 @@
         st.subscription.robokassa_sum = robokassaSum;
         st.subscription.robokassa_url = robokassaUrl;
 
-        const coreSubPayload = {
-          student_id: targetUserId,
-          total_sessions: Number(totalSessions) || 0,
-          used_sessions: Number(usedSessions) || 0,
-          session_duration_minutes: Number(durationMins) || 60,
-          billing_day: Number(billingDay) || 1,
-          status: 'active'
-        };
+        const safeNumericTargetId = toValidNumericIdOrNull(targetUserId);
 
-        let subId = st.subscription.id;
-        if (!subId) {
-          const { data: existingSubs } = await supabaseClient
-            .from('subscriptions')
-            .select('id')
-            .eq('student_id', targetUserId)
-            .eq('status', 'active')
-            .order('id', { ascending: false })
-            .limit(1);
-          if (existingSubs && existingSubs.length > 0) {
-            subId = existingSubs[0].id;
-            st.subscription.id = subId;
+        try {
+          if (safeNumericTargetId) {
+            const coreSubPayload = {
+              student_id: safeNumericTargetId,
+              total_sessions: Number(totalSessions) || 0,
+              used_sessions: Number(usedSessions) || 0,
+              session_duration_minutes: Number(durationMins) || 60,
+              billing_day: Number(billingDay) || 1,
+              status: 'active'
+            };
+
+            let subId = toValidNumericIdOrNull(st.subscription.id);
+            if (!subId) {
+              const { data: existingSubs } = await supabaseClient
+                .from('subscriptions')
+                .select('id')
+                .eq('student_id', safeNumericTargetId)
+                .eq('status', 'active')
+                .order('id', { ascending: false })
+                .limit(1);
+              if (existingSubs && existingSubs.length > 0) {
+                subId = existingSubs[0].id;
+                st.subscription.id = subId;
+              }
+            }
+
+            if (subId) {
+              const { data: updSub, error: subUpdErr } = await supabaseClient
+                .from('subscriptions')
+                .update(coreSubPayload)
+                .eq('id', subId)
+                .select()
+                .maybeSingle();
+
+              if (subUpdErr) {
+                console.warn('Предупреждение при обновлении subscriptions:', subUpdErr);
+              } else if (updSub) {
+                currentSubscription = updSub;
+              }
+            } else {
+              const { data: insSub, error: subInsErr } = await supabaseClient
+                .from('subscriptions')
+                .insert([coreSubPayload])
+                .select()
+                .maybeSingle();
+
+              if (subInsErr) {
+                console.warn('Предупреждение при создании subscriptions:', subInsErr);
+              } else if (insSub) {
+                st.subscription.id = insSub.id;
+                currentSubscription = insSub;
+              }
+            }
           }
-        }
-
-        if (subId) {
-          const { data: updSub, error: subUpdErr } = await supabaseClient
-            .from('subscriptions')
-            .update(coreSubPayload)
-            .eq('id', subId)
-            .select()
-            .maybeSingle();
-
-          if (subUpdErr) {
-            console.warn('Предупреждение при обновлении subscriptions:', subUpdErr);
-          } else if (updSub) {
-            currentSubscription = updSub;
-          }
-        } else {
-          const { data: insSub, error: subInsErr } = await supabaseClient
-            .from('subscriptions')
-            .insert([coreSubPayload])
-            .select()
-            .maybeSingle();
-
-          if (subInsErr) {
-            console.warn('Предупреждение при создании subscriptions:', subInsErr);
-          } else if (insSub) {
-            st.subscription.id = insSub.id;
-            currentSubscription = insSub;
-          }
+        } catch (subWrapErr) {
+          console.warn('Изолированная ошибка работы с таблицей subscriptions:', subWrapErr);
         }
 
         try {
+          const safePhotoReports = (Array.isArray(st.photo_reports) ? st.photo_reports : []).map(pr => ({
+            date: pr.date || getCurrentMonthYearLabel(),
+            front_file_id: pr.front_file_id || '',
+            side_file_id: pr.side_file_id || '',
+            back_file_id: pr.back_file_id || '',
+            front_custom: Boolean(pr.front_custom),
+            side_custom: Boolean(pr.side_custom),
+            back_custom: Boolean(pr.back_custom),
+            front_url: (pr.front_url && String(pr.front_url).length < 40000) ? pr.front_url : '',
+            side_url: (pr.side_url && String(pr.side_url).length < 40000) ? pr.side_url : '',
+            back_url: (pr.back_url && String(pr.back_url).length < 40000) ? pr.back_url : ''
+          }));
+
           const metaObject = {
             access_code: cleanCode,
             telegram_username: cleanTg,
             full_name: fullName,
             avatar: st.avatar || 'АТ',
             status: st.status || 'active',
-            session_duration: durationMins,
+            session_duration: Number(durationMins) || 60,
             freeze_details: st.freeze_details || { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
             subscription: {
               id: st.subscription.id || null,
-              total: totalSessions,
-              total_sessions: totalSessions,
-              used: usedSessions,
-              used_sessions: usedSessions,
-              remaining: remainingSessions,
-              payment_day: billingDay,
-              billing_day: billingDay,
+              total: Number(totalSessions) || 0,
+              total_sessions: Number(totalSessions) || 0,
+              used: Number(usedSessions) || 0,
+              used_sessions: Number(usedSessions) || 0,
+              remaining: Number(remainingSessions) || 0,
+              payment_day: Number(billingDay) || 1,
+              billing_day: Number(billingDay) || 1,
               robokassa_sum: robokassaSum,
               robokassa_url: robokassaUrl
             },
@@ -252,19 +283,28 @@
             anthropometry: Array.isArray(st.anthropometry) ? st.anthropometry : [],
             checkups: Array.isArray(st.checkups) ? st.checkups : [],
             inbody: Array.isArray(st.inbody) ? st.inbody : [],
-            photo_reports: Array.isArray(st.photo_reports) ? st.photo_reports : []
+            photo_reports: safePhotoReports
           };
 
-          await supabaseClient
-            .from('student_reports')
-            .delete()
-            .eq('student_id', targetUserId)
-            .eq('type', 'profile_meta');
+          if (cleanCode) {
+            await supabaseClient
+              .from('student_reports')
+              .delete()
+              .eq('student_code', cleanCode)
+              .eq('type', 'profile_meta');
+          }
+          if (safeNumericTargetId) {
+            await supabaseClient
+              .from('student_reports')
+              .delete()
+              .eq('student_id', safeNumericTargetId)
+              .eq('type', 'profile_meta');
+          }
 
           await supabaseClient
             .from('student_reports')
             .insert([{
-              student_id: targetUserId,
+              student_id: safeNumericTargetId,
               student_code: cleanCode || 'N/A',
               type: 'profile_meta',
               photo_file_id: JSON.stringify(metaObject),
@@ -282,17 +322,17 @@
       }
     }
 
-    function syncSupabaseStateToLocalApp(user, sub, bookings, preferredStudentId = null) {
+    function syncSupabaseStateToLocalApp(user, sub, bookings, preferredStudentId = null, profileMeta = null) {
       if (typeof appData === 'undefined' || !appData || !Array.isArray(appData.students)) return;
       if (!user || !user.id) return;
       if (user.role === 'coach' || user.role === 'trainer') return;
 
       let student = null;
       if (preferredStudentId) {
-        student = appData.students.find(s => s.id === preferredStudentId || s.supabase_id === preferredStudentId || s.access_code === preferredStudentId);
+        student = appData.students.find(s => String(s.id) === String(preferredStudentId) || String(s.supabase_id) === String(preferredStudentId) || (s.access_code && String(s.access_code).toUpperCase() === String(preferredStudentId).toUpperCase()));
       }
       if (!student) {
-        student = appData.students.find(s => s.id === user.id || s.supabase_id === user.id);
+        student = appData.students.find(s => String(s.id) === String(user.id) || String(s.supabase_id) === String(user.id));
       }
       if (!student) return;
 
@@ -308,7 +348,7 @@
         if (appData.schedule_slots) {
           Object.keys(appData.schedule_slots).forEach(dateKey => {
             (appData.schedule_slots[dateKey] || []).forEach(slot => {
-              if (slot.booked_by === oldId) {
+              if (String(slot.booked_by) === String(oldId)) {
                 slot.booked_by = newId;
               }
             });
@@ -318,22 +358,29 @@
         student.supabase_id = newId;
       }
 
-      const fullName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || user.name || '';
+      const fullName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || (profileMeta && profileMeta.full_name) || user.name || '';
       if (fullName && !fullName.startsWith('Демо ')) {
         student.full_name = fullName;
       }
 
-      if (sub) {
-        currentSubscription = sub;
-        const total = Math.max(0, Number(sub.total_sessions ?? student.subscription?.total ?? 0) || 0);
-        const used = Math.min(total, Math.max(0, Number(sub.used_sessions ?? student.subscription?.used ?? 0) || 0));
+      const metaSub = (profileMeta && profileMeta.subscription) ? profileMeta.subscription : null;
+      if (sub || metaSub) {
+        if (sub) currentSubscription = sub;
+        const metaTotal = metaSub ? Number(metaSub.total ?? metaSub.total_sessions) : NaN;
+        const subTotal = sub ? Number(sub.total_sessions) : NaN;
+        const total = Math.max(0, (!isNaN(metaTotal) && (metaTotal > 0 || !subTotal)) ? metaTotal : (Number(sub?.total_sessions ?? student.subscription?.total ?? 0) || 0));
+
+        const metaUsed = metaSub ? Number(metaSub.used ?? metaSub.used_sessions) : NaN;
+        const subUsed = sub ? Number(sub.used_sessions) : NaN;
+        const used = Math.min(total, Math.max(0, (!isNaN(metaUsed) && (metaUsed > 0 || !subUsed)) ? metaUsed : (Number(sub?.used_sessions ?? student.subscription?.used ?? 0) || 0)));
+
         const remaining = Math.max(0, total - used);
-        const dur = Number(sub.session_duration_minutes) || student.session_duration || 60;
-        const billDay = Math.min(28, Math.max(1, Number(sub.billing_day ?? student.subscription?.payment_day) || 1));
+        const dur = Number(profileMeta?.session_duration ?? sub?.session_duration_minutes ?? student.session_duration) || 60;
+        const billDay = Math.min(28, Math.max(1, Number(metaSub?.payment_day ?? metaSub?.billing_day ?? sub?.billing_day ?? student.subscription?.payment_day) || 1));
 
         student.session_duration = dur;
         if (!student.subscription) student.subscription = {};
-        student.subscription.id = sub.id;
+        if (sub && sub.id) student.subscription.id = sub.id;
         student.subscription.total = total;
         student.subscription.total_sessions = total;
         student.subscription.used = used;
@@ -341,18 +388,36 @@
         student.subscription.remaining = remaining;
         student.subscription.payment_day = billDay;
         student.subscription.billing_day = billDay;
-        if (sub.robokassa_sum !== undefined) student.subscription.robokassa_sum = sub.robokassa_sum;
-        if (sub.robokassa_url !== undefined) student.subscription.robokassa_url = sub.robokassa_url;
+
+        const resolvedSum = metaSub?.robokassa_sum ?? sub?.robokassa_sum ?? student.subscription.robokassa_sum ?? '0 ₽';
+        const resolvedUrl = metaSub?.robokassa_url ?? sub?.robokassa_url ?? student.subscription.robokassa_url ?? '';
+        student.subscription.robokassa_sum = resolvedSum;
+        student.subscription.robokassa_url = resolvedUrl;
+      }
+
+      if (profileMeta) {
+        if (profileMeta.freeze_details) {
+          student.freeze_details = profileMeta.freeze_details;
+          student.status = profileMeta.freeze_details.is_frozen ? 'frozen' : 'active';
+        }
+        if (profileMeta.medical_notes !== undefined) student.medical_notes = profileMeta.medical_notes;
+        if (profileMeta.trainer_private_notes !== undefined) student.trainer_private_notes = profileMeta.trainer_private_notes;
+        if (profileMeta.notification_settings) student.notification_settings = profileMeta.notification_settings;
+        if (Array.isArray(profileMeta.workouts)) student.workouts = profileMeta.workouts;
+        if (Array.isArray(profileMeta.anthropometry)) student.anthropometry = profileMeta.anthropometry.map(normalizeAnthropometryRecord);
+        if (Array.isArray(profileMeta.checkups)) student.checkups = profileMeta.checkups;
+        if (Array.isArray(profileMeta.inbody)) student.inbody = profileMeta.inbody.map(enrichInBodyRecord);
       }
 
       if (Array.isArray(bookings)) {
-        const confirmed = bookings.filter(b => !b.status || b.status === 'confirmed');
+        const todayIso = formatISO(getTodayDateObj());
+        const confirmed = bookings.filter(b => (!b.status || b.status === 'confirmed') && (!b.session_date || b.session_date >= todayIso));
         if (appData.schedule_slots) {
           Object.keys(appData.schedule_slots).forEach(dateKey => {
             (appData.schedule_slots[dateKey] || []).forEach(slot => {
-              if (slot.booked_by === student.id) {
+              if (String(slot.booked_by) === String(student.id)) {
                 slot.booked_by = null;
-                slot.is_open = true;
+                slot.is_open = slot.baseline_closed ? false : Boolean(slot.is_open);
               }
             });
           });
@@ -402,7 +467,8 @@
         const bks = Array.isArray(bksRes.data) ? bksRes.data : [];
         const reports = Array.isArray(reportsRes.data) ? reportsRes.data : [];
 
-        const scheduleReport = reports.find(r => r.type === 'schedule_meta' && r.student_code === 'TRAINER_SCHEDULE');
+        const scheduleReports = reports.filter(r => r.type === 'schedule_meta' && r.student_code === 'TRAINER_SCHEDULE');
+        const scheduleReport = scheduleReports.length > 0 ? scheduleReports[scheduleReports.length - 1] : null;
         if (scheduleReport && scheduleReport.photo_file_id) {
           try {
             const parsedSchedule = JSON.parse(scheduleReport.photo_file_id);
@@ -411,8 +477,9 @@
                 if (Array.isArray(parsedSchedule[dateKey])) {
                   appData.schedule_slots[dateKey] = parsedSchedule[dateKey].map(s => ({
                     time: s.time,
-                    duration: s.duration || 60,
+                    duration: Number(s.duration) || 60,
                     is_open: Boolean(s.is_open),
+                    baseline_closed: s.baseline_closed !== undefined ? Boolean(s.baseline_closed) : !Boolean(s.is_open),
                     booked_by: null
                   }));
                 }
@@ -437,8 +504,10 @@
           }
         });
 
+        const todayIsoNow = formatISO(getTodayDateObj());
         const bksMap = new Map();
         bks.forEach(b => {
+          if (b.session_date && b.session_date < todayIsoNow) return;
           if (!bksMap.has(b.student_id)) bksMap.set(b.student_id, []);
           bksMap.get(b.student_id).push(b);
         });
@@ -449,6 +518,7 @@
             const parsed = JSON.parse(r.photo_file_id || '{}');
             if (r.student_id) metaMap.set(String(r.student_id), parsed);
             if (r.student_code) metaMap.set(String(r.student_code).toUpperCase(), parsed);
+            if (parsed && parsed.access_code) metaMap.set(String(parsed.access_code).toUpperCase(), parsed);
           } catch (e) {}
         });
 
@@ -463,7 +533,8 @@
         for (let i = users.length - 1; i >= 0; i--) {
           const u = users[i];
           const parsedInfo = parseUsernameAndCode(u.username, u.access_code);
-          const key = parsedInfo.access_code || String(u.id);
+          const metaForU = metaMap.get(String(u.id)) || (parsedInfo.access_code ? metaMap.get(parsedInfo.access_code) : null);
+          const key = parsedInfo.access_code || (metaForU && metaForU.access_code ? String(metaForU.access_code).toUpperCase() : String(u.id));
           if (seenKeys.has(key)) continue;
           seenKeys.add(key);
           deduplicatedUsers.unshift(u);
@@ -477,22 +548,34 @@
           const meta = metaMap.get(String(u.id)) || (parsedInfo.access_code ? metaMap.get(parsedInfo.access_code) : null) || {};
           const prevSt = existingMap.get(String(u.id)) || (parsedInfo.access_code ? existingMap.get(parsedInfo.access_code) : null) || null;
 
-          const userFullName = `${u.first_name || ''} ${u.last_name || ''}`.trim() || meta.full_name || prevSt?.full_name || 'Атлет';
+          const userFullName = meta.full_name || `${u.first_name || ''} ${u.last_name || ''}`.trim() || prevSt?.full_name || 'Атлет';
           const userSub = subsMap.get(u.id);
           const userBks = bksMap.get(u.id) || [];
 
-          const hasSubRecord = Boolean(userSub);
-          const total = Math.max(0, Number(hasSubRecord ? userSub.total_sessions : (meta?.subscription?.total ?? prevSt?.subscription?.total ?? 0)) || 0);
-          const used = Math.min(total, Math.max(0, Number(hasSubRecord ? userSub.used_sessions : (meta?.subscription?.used ?? prevSt?.subscription?.used ?? 0)) || 0));
-          const remaining = Math.max(0, total - used);
-          const dur = Number(hasSubRecord ? userSub.session_duration_minutes : (meta?.session_duration ?? prevSt?.session_duration)) || 60;
-          const billDay = Math.min(28, Math.max(1, Number(hasSubRecord ? userSub.billing_day : (meta?.subscription?.payment_day ?? prevSt?.subscription?.payment_day)) || 1));
+          const metaSub = meta.subscription || null;
+          const hasMetaTotal = metaSub && (metaSub.total !== undefined || metaSub.total_sessions !== undefined);
+          const metaTotalVal = hasMetaTotal ? Number(metaSub.total ?? metaSub.total_sessions ?? 0) : NaN;
+          const subTotalVal = userSub ? Number(userSub.total_sessions ?? 0) : NaN;
+          const total = Math.max(0, (!isNaN(metaTotalVal) && (metaTotalVal > 0 || !subTotalVal))
+            ? metaTotalVal
+            : (!isNaN(subTotalVal) ? subTotalVal : (Number(prevSt?.subscription?.total ?? 0) || 0)));
 
-          const rawSum = userSub?.robokassa_sum ?? meta?.subscription?.robokassa_sum ?? prevSt?.subscription?.robokassa_sum ?? '0 ₽';
+          const hasMetaUsed = metaSub && (metaSub.used !== undefined || metaSub.used_sessions !== undefined);
+          const metaUsedVal = hasMetaUsed ? Number(metaSub.used ?? metaSub.used_sessions ?? 0) : NaN;
+          const subUsedVal = userSub ? Number(userSub.used_sessions ?? 0) : NaN;
+          const used = Math.min(total, Math.max(0, (!isNaN(metaUsedVal) && (metaUsedVal > 0 || !subUsedVal))
+            ? metaUsedVal
+            : (!isNaN(subUsedVal) ? subUsedVal : (Number(prevSt?.subscription?.used ?? 0) || 0))));
+
+          const remaining = Math.max(0, total - used);
+          const dur = Number(meta?.session_duration ?? userSub?.session_duration_minutes ?? prevSt?.session_duration) || 60;
+          const billDay = Math.min(28, Math.max(1, Number(metaSub?.payment_day ?? metaSub?.billing_day ?? userSub?.billing_day ?? prevSt?.subscription?.payment_day) || 1));
+
+          const rawSum = metaSub?.robokassa_sum ?? userSub?.robokassa_sum ?? prevSt?.subscription?.robokassa_sum ?? '0 ₽';
           const cleanSumStr = typeof rawSum === 'number'
             ? formatRublesFromNumber(rawSum)
             : (String(rawSum).includes('₽') ? String(rawSum) : formatRublesFromNumber(parseNumericRubles(rawSum)));
-          const cleanUrlStr = userSub?.robokassa_url ?? meta?.subscription?.robokassa_url ?? prevSt?.subscription?.robokassa_url ?? '';
+          const cleanUrlStr = metaSub?.robokassa_url ?? userSub?.robokassa_url ?? prevSt?.subscription?.robokassa_url ?? '';
 
           let code = parsedInfo.access_code || meta.access_code || prevSt?.access_code || '';
           if (!code || usedCodes.has(code)) {
@@ -573,7 +656,9 @@
         });
 
         appData.students = freshStudents;
-        if (appData.current_student_id && !appData.students.some(s => s.id === appData.current_student_id)) {
+        migrateLoadedData();
+        await autoProcessCompletedBookings();
+        if (appData.current_student_id && !appData.students.some(s => String(s.id) === String(appData.current_student_id))) {
           appData.current_student_id = appData.students[0] ? appData.students[0].id : null;
         }
         renderApp();
@@ -606,8 +691,12 @@
           if (byId) user = byId;
         }
 
-        if (!user && preferredStudent && preferredStudent.access_code) {
-          const codeUpper = preferredStudent.access_code.trim().toUpperCase();
+        let resolvedProfileMeta = null;
+        const codeUpper = (preferredStudent && preferredStudent.access_code)
+          ? preferredStudent.access_code.trim().toUpperCase()
+          : (options.accessCode ? String(options.accessCode).trim().toUpperCase() : '');
+
+        if (!user && codeUpper) {
           const { data: byCodeList } = await supabaseClient
             .from('users')
             .select('*')
@@ -618,8 +707,47 @@
           }
         }
 
+        if (!user && codeUpper) {
+          const { data: repByCode } = await supabaseClient
+            .from('student_reports')
+            .select('*')
+            .eq('student_code', codeUpper)
+            .eq('type', 'profile_meta')
+            .order('id', { ascending: false })
+            .limit(1);
+          if (Array.isArray(repByCode) && repByCode.length > 0) {
+            const rep = repByCode[0];
+            try {
+              resolvedProfileMeta = JSON.parse(rep.photo_file_id || '{}');
+            } catch (e) {}
+            if (rep.student_id) {
+              const { data: byRepUserId } = await supabaseClient
+                .from('users')
+                .select('*')
+                .eq('id', rep.student_id)
+                .maybeSingle();
+              if (byRepUserId) user = byRepUserId;
+            }
+          }
+        }
+
         if (!user) {
           return { user: null, sub: null };
+        }
+
+        if (!resolvedProfileMeta) {
+          const { data: metaRows } = await supabaseClient
+            .from('student_reports')
+            .select('*')
+            .eq('student_id', user.id)
+            .eq('type', 'profile_meta')
+            .order('id', { ascending: false })
+            .limit(1);
+          if (Array.isArray(metaRows) && metaRows.length > 0) {
+            try {
+              resolvedProfileMeta = JSON.parse(metaRows[0].photo_file_id || '{}');
+            } catch (e) {}
+          }
         }
 
         const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
@@ -642,20 +770,24 @@
         let sub = (subsList && subsList.length > 0) ? subsList[0] : null;
 
         if (!sub) {
-          const { data: newSub, error: subCreateErr } = await supabaseClient
-            .from('subscriptions')
-            .insert([{
-              student_id: user.id,
-              total_sessions: 0,
-              used_sessions: 0,
-              session_duration_minutes: preferredStudent?.session_duration || 60,
-              billing_day: preferredStudent?.subscription?.payment_day || 1,
-              status: 'active'
-            }])
-            .select()
-            .maybeSingle();
+          try {
+            const { data: newSub, error: subCreateErr } = await supabaseClient
+              .from('subscriptions')
+              .insert([{
+                student_id: user.id,
+                total_sessions: Number(resolvedProfileMeta?.subscription?.total ?? preferredStudent?.subscription?.total ?? 0) || 0,
+                used_sessions: Number(resolvedProfileMeta?.subscription?.used ?? preferredStudent?.subscription?.used ?? 0) || 0,
+                session_duration_minutes: Number(resolvedProfileMeta?.session_duration ?? preferredStudent?.session_duration) || 60,
+                billing_day: Number(resolvedProfileMeta?.subscription?.payment_day ?? preferredStudent?.subscription?.payment_day) || 1,
+                status: 'active'
+              }])
+              .select()
+              .maybeSingle();
 
-          if (!subCreateErr && newSub) sub = newSub;
+            if (!subCreateErr && newSub) sub = newSub;
+          } catch (subInitErr) {
+            console.warn('Предупреждение при инициализации subscriptions:', subInitErr);
+          }
         }
 
         const { data: userBks } = await supabaseClient
@@ -667,7 +799,7 @@
         currentUser = user;
         if (sub) currentSubscription = sub;
 
-        syncSupabaseStateToLocalApp(user, sub, userBks || [], preferredStudent ? preferredStudent.id : user.id);
+        syncSupabaseStateToLocalApp(user, sub, userBks || [], preferredStudent ? preferredStudent.id : user.id, resolvedProfileMeta);
         renderApp();
 
         return { user, sub };
@@ -1096,11 +1228,13 @@
       for (let h = startH; h < endH; h++) {
         const timeStr = `${String(h).padStart(2, '0')}:00`;
         const bookedBy = bookingsMap[timeStr] || null;
-        const isOpen = bookedBy ? true : !closedHours.includes(h);
+        const isClosedBaseline = Array.isArray(closedHours) && closedHours.includes(h);
+        const isOpen = bookedBy ? true : !isClosedBaseline;
         slots.push({
           time: timeStr,
           duration: 60,
           is_open: isOpen,
+          baseline_closed: isClosedBaseline,
           booked_by: bookedBy
         });
       }
@@ -1180,32 +1314,46 @@ const TELEGRAM_STORAGE_CONFIG = {
 
       const currentStudent = getCurrentStudent();
       const studentName = currentStudent ? (currentStudent.full_name || currentStudent.name || 'Подопечный') : 'Подопечный';
-      const studentCode = currentStudent ? currentStudent.access_code : 'N/A';
+      const studentCode = currentStudent ? (currentStudent.access_code || 'N/A') : 'N/A';
+      const rawId = currentStudent ? (currentStudent.supabase_id || currentStudent.id) : appData.current_student_id;
+      const safeNumericStudentId = toValidNumericIdOrNull(rawId);
 
       showToast('Загружаем фото в архив...', 'info');
+
+      let fileIdToSave = `local_photo_${Date.now()}`;
+      let msgIdToSave = 0;
 
       try {
         const caption = `📌 Отчёт: ${studentName} (${studentCode})\nТип: ${recordType}\nДата: ${new Date().toLocaleDateString('ru-RU')}`;
         const tgData = await uploadMediaToTelegram(file, caption);
+        if (tgData && tgData.file_id) {
+          fileIdToSave = tgData.file_id;
+          msgIdToSave = Number(tgData.message_id) || 0;
+        }
+      } catch (tgErr) {
+        console.warn('Fallback медиа-хранилища Telegram (сохраняем мета-запись в Supabase):', tgErr);
+      }
 
+      try {
         if (typeof supabaseClient !== 'undefined' && supabaseClient) {
-          await supabaseClient
+          const { error: repInsertErr } = await supabaseClient
             .from('student_reports')
             .insert([{
-              student_id: appData.current_student_id,
+              student_id: safeNumericStudentId,
               student_code: studentCode,
               type: recordType,
-              photo_file_id: tgData.file_id,
-              telegram_msg_id: tgData.message_id,
+              photo_file_id: fileIdToSave,
+              telegram_msg_id: msgIdToSave,
               created_at: new Date().toISOString()
             }]);
+          if (repInsertErr) throw repInsertErr;
         }
 
         showToast('Фото успешно прикреплено!', 'success');
         if (typeof renderApp === 'function') renderApp();
       } catch (err) {
-        console.error('Ошибка загрузки медиа:', err);
-        showToast('Ошибка загрузки: ' + err.message, 'error');
+        console.error('Ошибка сохранения отчёта в Supabase:', err);
+        showToast('Ошибка сохранения отчёта: ' + (err.message || 'проверьте соединение'), 'error');
       }
     }
     function buildInitialSeedData() {
@@ -1315,15 +1463,20 @@ const TELEGRAM_STORAGE_CONFIG = {
       return;
     }
 
-    function autoProcessCompletedBookings() {
+    async function autoProcessCompletedBookings() {
       const todayIso = formatISO(getTodayDateObj());
+      const expiredBookingIds = [];
       let changed = false;
+
       (appData.students || []).forEach(st => {
         if (!Array.isArray(st.active_bookings)) st.active_bookings = [];
         const remainingBookings = [];
         st.active_bookings.forEach(bk => {
-          if (bk.date < todayIso) {
-            // Занятие уже было списано с баланса при оформлении бронирования
+          if (bk.date && bk.date < todayIso) {
+            releaseBookingEntryFromSchedule(st, bk);
+            if (bk.id && !String(bk.id).startsWith('bk-')) {
+              expiredBookingIds.push(bk.id);
+            }
             changed = true;
           } else {
             remainingBookings.push(bk);
@@ -1331,7 +1484,29 @@ const TELEGRAM_STORAGE_CONFIG = {
         });
         st.active_bookings = remainingBookings;
       });
-      if (changed) saveAppData();
+
+      if (supabaseClient) {
+        try {
+          if (expiredBookingIds.length > 0) {
+            await supabaseClient
+              .from('bookings')
+              .update({ status: 'completed' })
+              .in('id', expiredBookingIds);
+          }
+          await supabaseClient
+            .from('bookings')
+            .update({ status: 'completed' })
+            .lt('session_date', todayIso)
+            .eq('status', 'confirmed');
+        } catch (err) {
+          console.warn('Не удалось архивировать прошедшие бронирования в Supabase:', err);
+        }
+      }
+
+      if (changed) {
+        await persistScheduleSlotsToSupabase();
+        saveAppData();
+      }
     }
 
     function getCurrentStudent() {
@@ -1444,6 +1619,15 @@ const TELEGRAM_STORAGE_CONFIG = {
 
     function saveSessionToTelegramCloud(role, studentId = '', accessCode = '') {
       try {
+        if (typeof sessionStorage !== 'undefined') {
+          sessionStorage.setItem('sv_role', String(role || ''));
+          sessionStorage.setItem('sv_student_id', String(studentId || ''));
+          sessionStorage.setItem('sv_access_code', String(accessCode || ''));
+        }
+      } catch (ssErr) {
+        console.warn('sessionStorage setItem fallback:', ssErr);
+      }
+      try {
         const cs = window.Telegram?.WebApp?.CloudStorage;
         if (cs && typeof cs.setItem === 'function') {
           cs.setItem('sv_role', String(role || ''), () => {});
@@ -1456,6 +1640,15 @@ const TELEGRAM_STORAGE_CONFIG = {
     }
 
     function clearSessionInTelegramCloud() {
+      try {
+        if (typeof sessionStorage !== 'undefined') {
+          sessionStorage.removeItem('sv_role');
+          sessionStorage.removeItem('sv_student_id');
+          sessionStorage.removeItem('sv_access_code');
+        }
+      } catch (ssErr) {
+        console.warn('sessionStorage removeItem fallback:', ssErr);
+      }
       try {
         const cs = window.Telegram?.WebApp?.CloudStorage;
         if (cs && typeof cs.removeItems === 'function') {
@@ -1472,8 +1665,24 @@ const TELEGRAM_STORAGE_CONFIG = {
 
     async function restoreSessionFromTelegram() {
       try {
+        let sessionCandidate = null;
+        try {
+          if (typeof sessionStorage !== 'undefined') {
+            const ssRole = sessionStorage.getItem('sv_role');
+            const ssStudentId = sessionStorage.getItem('sv_student_id');
+            const ssAccessCode = sessionStorage.getItem('sv_access_code');
+            if (ssRole) {
+              sessionCandidate = {
+                sv_role: ssRole,
+                sv_student_id: ssStudentId || '',
+                sv_access_code: ssAccessCode || ''
+              };
+            }
+          }
+        } catch (ssReadErr) {}
+
         const cs = window.Telegram?.WebApp?.CloudStorage;
-        if (cs && typeof cs.getItems === 'function') {
+        if (!sessionCandidate && cs && typeof cs.getItems === 'function') {
           const stored = await new Promise(resolve => {
             let settled = false;
             const timer = setTimeout(() => {
@@ -1498,25 +1707,30 @@ const TELEGRAM_STORAGE_CONFIG = {
               }
             }
           });
-
           if (stored && stored.sv_role) {
-            if (stored.sv_role === 'trainer') {
-              appData.current_role = 'trainer';
+            sessionCandidate = stored;
+          }
+        }
+
+        if (sessionCandidate && sessionCandidate.sv_role) {
+          if (sessionCandidate.sv_role === 'trainer') {
+            appData.current_role = 'trainer';
+            saveSessionToTelegramCloud('trainer', '', '');
+            return true;
+          }
+          if (sessionCandidate.sv_role === 'student') {
+            const targetCode = String(sessionCandidate.sv_access_code || '').trim().toUpperCase();
+            const targetId = String(sessionCandidate.sv_student_id || '').trim();
+            let found = (appData.students || []).find(s =>
+              (targetId && String(s.id) === targetId) ||
+              (targetCode && String(s.access_code || '').toUpperCase() === targetCode)
+            );
+            if (found) {
+              appData.current_role = 'student';
+              appData.current_student_id = found.id;
+              saveSessionToTelegramCloud('student', found.id, found.access_code);
+              await getOrCreateSupabaseUser('student', { autoEnter: true, student: found, accessCode: targetCode });
               return true;
-            }
-            if (stored.sv_role === 'student') {
-              const targetCode = String(stored.sv_access_code || '').trim().toUpperCase();
-              const targetId = String(stored.sv_student_id || '').trim();
-              const found = (appData.students || []).find(s =>
-                (targetId && String(s.id) === targetId) ||
-                (targetCode && String(s.access_code || '').toUpperCase() === targetCode)
-              );
-              if (found) {
-                appData.current_role = 'student';
-                appData.current_student_id = found.id;
-                await getOrCreateSupabaseUser('student', { autoEnter: true, student: found });
-                return true;
-              }
             }
           }
         }
@@ -1544,7 +1758,7 @@ const TELEGRAM_STORAGE_CONFIG = {
           }
         }
       } catch (err) {
-        console.warn('Не удалось автоматически восстановить сессию Telegram:', err);
+        console.warn('Не удалось автоматически восстановить сессию:', err);
       }
       return false;
     }
@@ -1630,12 +1844,58 @@ const TELEGRAM_STORAGE_CONFIG = {
 
       let found = (appData.students || []).find(s => (s.access_code || s.code || '').toUpperCase() === val);
 
+      if (!found && supabaseClient) {
+        try {
+          const { data: repByCode } = await supabaseClient
+            .from('student_reports')
+            .select('*')
+            .eq('student_code', val)
+            .eq('type', 'profile_meta')
+            .order('id', { ascending: false })
+            .limit(1);
+          if (Array.isArray(repByCode) && repByCode.length > 0) {
+            const rep = repByCode[0];
+            found = (appData.students || []).find(s => String(s.id) === String(rep.student_id) || String(s.supabase_id) === String(rep.student_id));
+            if (!found) {
+              let parsedMeta = {};
+              try { parsedMeta = JSON.parse(rep.photo_file_id || '{}'); } catch (e) {}
+              const recoveredStudent = {
+                id: rep.student_id || ('step-' + Date.now()),
+                supabase_id: rep.student_id || null,
+                access_code: val,
+                telegram_username: parsedMeta.telegram_username || '',
+                full_name: parsedMeta.full_name || 'Атлет',
+                avatar: parsedMeta.avatar || 'АТ',
+                status: parsedMeta.status || 'active',
+                freeze_details: parsedMeta.freeze_details || { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
+                session_duration: Number(parsedMeta.session_duration) || 60,
+                subscription: parsedMeta.subscription || { id: null, total: 0, total_sessions: 0, used: 0, used_sessions: 0, remaining: 0, payment_day: 1, billing_day: 1, robokassa_sum: '0 ₽', robokassa_url: '' },
+                payment_history: Array.isArray(parsedMeta.payment_history) ? parsedMeta.payment_history : [],
+                medical_notes: parsedMeta.medical_notes || '',
+                trainer_private_notes: parsedMeta.trainer_private_notes || '',
+                notification_settings: parsedMeta.notification_settings || { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+                workouts: Array.isArray(parsedMeta.workouts) ? parsedMeta.workouts : [],
+                anthropometry: (Array.isArray(parsedMeta.anthropometry) ? parsedMeta.anthropometry : []).map(normalizeAnthropometryRecord),
+                checkups: Array.isArray(parsedMeta.checkups) ? parsedMeta.checkups : [],
+                inbody: (Array.isArray(parsedMeta.inbody) ? parsedMeta.inbody : []).map(enrichInBodyRecord),
+                photo_reports: Array.isArray(parsedMeta.photo_reports) ? parsedMeta.photo_reports : [],
+                active_bookings: []
+              };
+              appData.students.push(recoveredStudent);
+              found = recoveredStudent;
+            }
+          }
+        } catch (fallbackErr) {
+          console.warn('Запасной поиск по student_reports не удался:', fallbackErr);
+        }
+      }
+
       if (found) {
         triggerHaptic('success');
         appData.current_role = 'student';
         appData.current_student_id = found.id;
         uiState.onboardingMode = null;
-        await getOrCreateSupabaseUser('student', { autoEnter: true, student: found });
+        await getOrCreateSupabaseUser('student', { autoEnter: true, student: found, accessCode: val });
         const activeSt = getCurrentStudent() || found;
         saveSessionToTelegramCloud('student', activeSt.id, activeSt.access_code);
         renderApp();
@@ -1779,21 +2039,26 @@ function renderOnboardingScreen() {
       if (!student || !bookingObj) return;
       const { date, time, duration } = bookingObj;
       const daySlots = appData.schedule_slots[date];
-      const hoursNeeded = Math.ceil((duration || student.session_duration || 60) / 60);
+      const hoursNeeded = Math.ceil((Number(duration) || Number(student.session_duration) || 60) / 60);
       if (daySlots) {
         const startIdx = daySlots.findIndex(s => s.time === time);
         if (startIdx !== -1) {
           for (let k = 0; k < hoursNeeded; k++) {
-            if (daySlots[startIdx + k] && String(daySlots[startIdx + k].booked_by) === String(student.id)) {
-              daySlots[startIdx + k].booked_by = null;
-              daySlots[startIdx + k].is_open = true;
+            const slot = daySlots[startIdx + k];
+            if (slot && (String(slot.booked_by) === String(student.id) || (student.supabase_id && String(slot.booked_by) === String(student.supabase_id)))) {
+              slot.booked_by = null;
+              if (slot.baseline_closed) {
+                slot.is_open = false;
+              }
             }
           }
         } else {
           daySlots.forEach(s => {
-            if (String(s.booked_by) === String(student.id)) {
+            if (String(s.booked_by) === String(student.id) || (student.supabase_id && String(s.booked_by) === String(student.supabase_id))) {
               s.booked_by = null;
-              s.is_open = true;
+              if (s.baseline_closed) {
+                s.is_open = false;
+              }
             }
           });
         }
@@ -1890,7 +2155,10 @@ function renderOnboardingScreen() {
             console.warn('Ошибка синхронизации переноса с Supabase:', err);
           }
 
-          await persistScheduleSlotsToSupabase();
+          await Promise.all([
+            persistScheduleSlotsToSupabase(),
+            persistStudentToSupabase(student)
+          ]);
           saveAppData();
           triggerHaptic('success');
           showToast(`Запись перенесена на ${formatHumanDate(isoDate)} в ${startTime}. Баланс сохранён: ${student.subscription.remaining} из ${student.subscription.total}!`);
@@ -1949,6 +2217,7 @@ function renderOnboardingScreen() {
 
         activeStudent.active_bookings.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
 
+        await persistStudentToSupabase(activeStudent);
         await persistScheduleSlotsToSupabase();
         saveAppData();
         triggerHaptic('success');
@@ -1984,10 +2253,22 @@ function renderOnboardingScreen() {
   // 3. Синхронизируем возврат с Supabase
   try {
     if (typeof supabaseClient !== 'undefined' && supabaseClient) {
-      await supabaseClient
-        .from('bookings')
-        .delete()
-        .eq('id', bookingId);
+      if (bookingId && !String(bookingId).startsWith('bk-')) {
+        await supabaseClient
+          .from('bookings')
+          .delete()
+          .eq('id', bookingId);
+      } else {
+        const targetNumericId = toValidNumericIdOrNull(student.supabase_id || student.id);
+        if (targetNumericId) {
+          await supabaseClient
+            .from('bookings')
+            .delete()
+            .eq('student_id', targetNumericId)
+            .eq('session_date', target.date)
+            .eq('session_time', target.time);
+        }
+      }
 
       await persistStudentToSupabase(student);
       await persistScheduleSlotsToSupabase();
@@ -2276,8 +2557,14 @@ function renderOnboardingScreen() {
         const vEl = document.getElementById(`ex-video-${idx}`);
         if (nEl) ex.name = nEl.value;
         if (sEl) ex.sets = Number(sEl.value) || 4;
-        if (rEl) ex.reps = rEl.value === '' ? '' : Number(rEl.value);
-        if (wEl) ex.weight = wEl.value === '' ? '' : Number(wEl.value);
+        if (rEl) {
+          const rawR = String(rEl.value || '').replace(',', '.').trim();
+          ex.reps = rawR === '' ? '' : (Number(rawR) || 0);
+        }
+        if (wEl) {
+          const rawW = String(wEl.value || '').replace(',', '.').trim();
+          ex.weight = rawW === '' ? '' : (parseFloat(rawW) || 0);
+        }
         if (vEl) ex.video_url = vEl.value.trim();
       });
     }
@@ -2342,7 +2629,7 @@ function renderOnboardingScreen() {
       renderApp();
     }
 
-    function saveStudentWorkout() {
+    async function saveStudentWorkout() {
       syncDraftWorkoutFromDOM();
       const draft = uiState.draftWorkout;
       if (!draft) return;
@@ -2350,13 +2637,17 @@ function renderOnboardingScreen() {
       const title = (draft.title || '').trim() || 'Силовая тренировка';
       const validExercises = draft.exercises
         .filter(e => (e.name || '').trim() !== '')
-        .map(e => ({
-          name: e.name.trim(),
-          sets: Math.min(8, Math.max(1, Number(e.sets) || 4)),
-          reps: Number(e.reps) || 0,
-          weight: Number(e.weight) || 0,
-          video_url: (e.video_url || '').trim()
-        }));
+        .map(e => {
+          const cleanWeight = parseFloat(String(e.weight ?? '0').replace(',', '.')) || 0;
+          const cleanReps = parseInt(String(e.reps ?? '0').replace(',', '.'), 10) || 0;
+          return {
+            name: e.name.trim(),
+            sets: Math.min(8, Math.max(1, Number(e.sets) || 4)),
+            reps: cleanReps,
+            weight: cleanWeight,
+            video_url: (e.video_url || '').trim()
+          };
+        });
 
       if (validExercises.length === 0) {
         showToast('Заполните хотя бы одно упражнение', 'error');
@@ -2364,6 +2655,9 @@ function renderOnboardingScreen() {
       }
 
       const student = getCurrentStudent();
+      if (!student) return;
+      if (!Array.isArray(student.workouts)) student.workouts = [];
+
       const savedObj = {
         id: draft.id,
         date: draft.date,
@@ -2380,7 +2674,7 @@ function renderOnboardingScreen() {
         student.workouts.push(savedObj);
       }
 
-      persistStudentToSupabase(student);
+      await persistStudentToSupabase(student);
       refreshStudentExercisesDatalist();
       uiState.workoutEditorOpen = false;
       uiState.editingWorkoutId = null;
@@ -2680,31 +2974,43 @@ function renderOnboardingScreen() {
       `);
     }
 
-    function saveNewInBodyRecord() {
+    async function saveNewInBodyRecord() {
       const student = getCurrentStudent();
+      if (!student) return;
+      if (!Array.isArray(student.inbody)) student.inbody = [];
+
+      const readFloat = (id) => {
+        const el = document.getElementById(id);
+        return el ? (parseFloat(String(el.value || '0').replace(',', '.')) || 0) : 0;
+      };
+      const readInt = (id) => {
+        const el = document.getElementById(id);
+        return el ? (parseInt(String(el.value || '0').replace(',', '.'), 10) || 0) : 0;
+      };
+
       const record = enrichInBodyRecord({
         date: formatDotDate(formatISO(getTodayDateObj())),
-        weight: parseFloat(document.getElementById('inbody-weight').value) || 0,
-        muscle_mass: parseFloat(document.getElementById('inbody-muscle').value) || 0,
-        body_fat_pct: parseFloat(document.getElementById('inbody-fat').value) || 0,
-        water: parseFloat(document.getElementById('inbody-water').value) || 0,
-        protein: parseFloat(document.getElementById('inbody-protein').value) || 0,
-        minerals: parseFloat(document.getElementById('inbody-minerals').value) || 0,
-        visceral_fat: parseInt(document.getElementById('inbody-visceral').value, 10) || 0,
-        bmi: parseFloat(document.getElementById('inbody-bmi').value) || 0,
-        fat_free_mass: parseFloat(document.getElementById('inbody-ffm').value) || 0,
-        bmr: parseInt(document.getElementById('inbody-bmr').value, 10) || 0,
-        optimal_weight: parseFloat(document.getElementById('inbody-opt-weight').value) || 0,
-        calorie_norm: parseInt(document.getElementById('inbody-cal-norm').value, 10) || 0,
-        seg_left_arm: parseFloat(document.getElementById('inbody-seg-la').value) || 0,
-        seg_right_arm: parseFloat(document.getElementById('inbody-seg-ra').value) || 0,
-        seg_torso: parseFloat(document.getElementById('inbody-seg-tr').value) || 0,
-        seg_left_leg: parseFloat(document.getElementById('inbody-seg-ll').value) || 0,
-        seg_right_leg: parseFloat(document.getElementById('inbody-seg-rl').value) || 0
+        weight: readFloat('inbody-weight'),
+        muscle_mass: readFloat('inbody-muscle'),
+        body_fat_pct: readFloat('inbody-fat'),
+        water: readFloat('inbody-water'),
+        protein: readFloat('inbody-protein'),
+        minerals: readFloat('inbody-minerals'),
+        visceral_fat: readInt('inbody-visceral'),
+        bmi: readFloat('inbody-bmi'),
+        fat_free_mass: readFloat('inbody-ffm'),
+        bmr: readInt('inbody-bmr'),
+        optimal_weight: readFloat('inbody-opt-weight'),
+        calorie_norm: readInt('inbody-cal-norm'),
+        seg_left_arm: readFloat('inbody-seg-la'),
+        seg_right_arm: readFloat('inbody-seg-ra'),
+        seg_torso: readFloat('inbody-seg-tr'),
+        seg_left_leg: readFloat('inbody-seg-ll'),
+        seg_right_leg: readFloat('inbody-seg-rl')
       });
 
       student.inbody.push(record);
-      persistStudentToSupabase(student);
+      await persistStudentToSupabase(student);
       closeModal();
       triggerHaptic('success');
       showToast('Полный скан DDX InBody сохранён в базе!');
@@ -2872,13 +3178,47 @@ function renderOnboardingScreen() {
 
         const key = uiState.pendingPhotoSlotKey;
         const customFlagKey = key.replace('_url', '_custom');
+        const fileIdKey = key.replace('_url', '_file_id');
         latestReport[key] = compressedDataUrl;
         latestReport[customFlagKey] = true;
 
-        renderApp();
+        let shortFileId = `photo_${key}_${Date.now()}`;
+        let tgMsgId = 0;
+        try {
+          const caption = `📌 Фотоотчёт: ${student.full_name || 'Подопечный'} (${student.access_code || 'N/A'}) — ${uiState.pendingPhotoSlotTitle || key}`;
+          const tgRes = await uploadMediaToTelegram(file, caption);
+          if (tgRes && tgRes.file_id) {
+            shortFileId = tgRes.file_id;
+            tgMsgId = Number(tgRes.message_id) || 0;
+          }
+        } catch (tgUploadErr) {
+          console.warn('Fallback отправки фото в Telegram (сохраняем короткий file_id в Supabase):', tgUploadErr);
+        }
+
+        latestReport[fileIdKey] = shortFileId;
+
+        if (supabaseClient) {
+          try {
+            const safeNumericStudentId = toValidNumericIdOrNull(student.supabase_id || student.id);
+            await supabaseClient
+              .from('student_reports')
+              .insert([{
+                student_id: safeNumericStudentId,
+                student_code: student.access_code || 'N/A',
+                type: 'weekly_photo',
+                photo_file_id: shortFileId,
+                telegram_msg_id: tgMsgId,
+                created_at: new Date().toISOString()
+              }]);
+          } catch (repErr) {
+            console.warn('Не удалось записать weekly_photo в student_reports:', repErr);
+          }
+        }
+
         await persistStudentToSupabase(student);
         triggerHaptic('success');
         showToast(`Фото «${uiState.pendingPhotoSlotTitle}» сжато (JPEG 0.75) и сохранено в облаке!`);
+        renderApp();
       } catch (err) {
         showToast('Не удалось обработать изображение', 'error');
       }
@@ -2914,11 +3254,37 @@ function renderOnboardingScreen() {
       if (!student || !Array.isArray(student.photo_reports) || student.photo_reports.length === 0) return;
       const latestReport = student.photo_reports[student.photo_reports.length - 1];
       const customFlagKey = angleKey.replace('_url', '_custom');
+      const fileIdKey = angleKey.replace('_url', '_file_id');
+      const oldFileId = latestReport[fileIdKey] || null;
+
       latestReport[angleKey] = createSilhouetteDataUri(latestReport.date, angleTitle.toUpperCase(), 10, 0, '#00E676');
       latestReport[customFlagKey] = false;
-      renderApp();
+      latestReport[fileIdKey] = '';
+
+      if (supabaseClient) {
+        try {
+          let delQuery = supabaseClient
+            .from('student_reports')
+            .delete()
+            .eq('type', 'weekly_photo');
+
+          if (oldFileId) {
+            delQuery = delQuery.eq('photo_file_id', oldFileId);
+          } else if (student.access_code) {
+            delQuery = delQuery.eq('student_code', student.access_code);
+          } else {
+            const safeId = toValidNumericIdOrNull(student.supabase_id || student.id);
+            if (safeId) delQuery = delQuery.eq('student_id', safeId);
+          }
+          await delQuery;
+        } catch (delErr) {
+          console.warn('Не удалось удалить запись weekly_photo из student_reports:', delErr);
+        }
+      }
+
       await persistStudentToSupabase(student);
       showToast(`Фото «${angleTitle}» удалено, восстановлен базовый силуэт`);
+      renderApp();
     }
 
     async function addNewMonthlyPhotoSlice() {
@@ -2929,10 +3295,10 @@ function renderOnboardingScreen() {
       student.photo_reports.push(createDefaultPhotoReportSlice(label));
       uiState.photoCompareIdxA = 0;
       uiState.photoCompareIdxB = student.photo_reports.length - 1;
-      renderApp();
       await persistStudentToSupabase(student);
       triggerHaptic('success');
       showToast('Новый ежемесячный фотоотчёт (3 ракурса) создан!');
+      renderApp();
     }
 
     function updatePhotoCompareControl(field, val) {
@@ -2954,8 +3320,11 @@ function renderOnboardingScreen() {
       renderApp();
     }
 
-    function submitWeeklyCheckup() {
+    async function submitWeeklyCheckup() {
       const student = getCurrentStudent();
+      if (!student) return;
+      if (!Array.isArray(student.checkups)) student.checkups = [];
+
       const wEl = document.getElementById('chk-weight');
       const dEl = document.getElementById('chk-workouts');
       const gEl = document.getElementById('chk-growth');
@@ -2965,7 +3334,7 @@ function renderOnboardingScreen() {
       const dgEl = document.getElementById('chk-digestion');
       const cEl = document.getElementById('checkup-comment');
 
-      const parsedWeight = wEl ? parseFloat(wEl.value) : NaN;
+      const parsedWeight = wEl ? parseFloat(String(wEl.value || '0').replace(',', '.')) : NaN;
       const parsedWorkouts = dEl ? parseInt(dEl.value, 10) : NaN;
       const record = {
         date: formatDotDate(formatISO(getTodayDateObj())),
@@ -2980,7 +3349,7 @@ function renderOnboardingScreen() {
       };
 
       student.checkups.push(record);
-      persistStudentToSupabase(student);
+      await persistStudentToSupabase(student);
       triggerHaptic('success');
       showToast('Еженедельный чек-ап сохранён и отправлен тренеру!');
       renderApp();
@@ -3500,8 +3869,8 @@ function renderOnboardingScreen() {
 
       student.freeze_details.is_frozen = !student.freeze_details.is_frozen;
       student.status = student.freeze_details.is_frozen ? 'frozen' : 'active';
-      renderApp();
       await persistStudentToSupabase(student);
+      renderApp();
       triggerHaptic('success');
       showToast(student.freeze_details.is_frozen
         ? `Режим заморозки включён до ${formatDotDate(student.freeze_details.to)}`
@@ -3515,8 +3884,8 @@ function renderOnboardingScreen() {
       const toEl = document.getElementById('freeze-to');
       if (fromEl) student.freeze_details.from = fromEl.value;
       if (toEl) student.freeze_details.to = toEl.value;
-      renderApp();
       await persistStudentToSupabase(student);
+      renderApp();
       showToast('Даты отпуска/заморозки сохранены в базе');
     }
 
@@ -3536,9 +3905,10 @@ function renderOnboardingScreen() {
     async function updateStudentNotificationSetting(key, val) {
       const student = getCurrentStudent();
       if (!student) return;
+      if (!student.notification_settings) student.notification_settings = {};
       student.notification_settings[key] = val;
-      renderApp();
       await persistStudentToSupabase(student);
+      renderApp();
       triggerHaptic('light');
       showToast('Настройки уведомлений в Telegram сохранены');
     }
@@ -3716,17 +4086,20 @@ function renderOnboardingScreen() {
       triggerHaptic('light');
       const iso = uiState.selectedTrainerScheduleDate;
       const existing = appData.schedule_slots[iso] || [];
-      draftGeneratorStartH = 9;
-      draftGeneratorEndH = 21;
+      draftGeneratorStartH = existing.length > 0 ? (parseInt(existing[0].time.split(':')[0], 10) || 9) : 9;
+      draftGeneratorEndH = existing.length > 0 ? ((parseInt(existing[existing.length - 1].time.split(':')[0], 10) || 20) + 1) : 21;
       draftGeneratorSlots = [];
 
       for (let h = draftGeneratorStartH; h < draftGeneratorEndH; h++) {
         const t = `${String(h).padStart(2, '0')}:00`;
         const found = existing.find(s => s.time === t);
+        const bookedBy = found ? (found.booked_by || null) : null;
+        const isOpen = bookedBy ? true : (found ? Boolean(found.is_open) : true);
         draftGeneratorSlots.push({
           time: t,
-          is_open: found ? found.is_open : true,
-          booked_by: found ? found.booked_by : null
+          is_open: isOpen,
+          baseline_closed: found ? (found.baseline_closed !== undefined ? Boolean(found.baseline_closed) : !isOpen) : false,
+          booked_by: bookedBy
         });
       }
       renderTrainerSlotGeneratorModalContent();
@@ -3737,14 +4110,25 @@ function renderOnboardingScreen() {
       const eEl = document.getElementById('gen-end-hour');
       const startH = Math.max(6, Math.min(22, parseInt(sEl ? sEl.value : 9, 10) || 9));
       const endH = Math.max(startH + 1, Math.min(23, parseInt(eEl ? eEl.value : 21, 10) || 21));
+      const iso = uiState.selectedTrainerScheduleDate;
+      const existingDaySlots = appData.schedule_slots[iso] || [];
+      const prevMap = new Map();
+      existingDaySlots.forEach(s => prevMap.set(s.time, s));
+      draftGeneratorSlots.forEach(s => prevMap.set(s.time, s));
+
       draftGeneratorStartH = startH;
       draftGeneratorEndH = endH;
       draftGeneratorSlots = [];
       for (let h = startH; h < endH; h++) {
+        const timeStr = `${String(h).padStart(2, '0')}:00`;
+        const prev = prevMap.get(timeStr);
+        const bookedBy = prev ? (prev.booked_by || null) : null;
+        const isOpen = bookedBy ? true : (prev ? Boolean(prev.is_open) : true);
         draftGeneratorSlots.push({
-          time: `${String(h).padStart(2, '0')}:00`,
-          is_open: true,
-          booked_by: null
+          time: timeStr,
+          is_open: isOpen,
+          baseline_closed: prev ? (prev.baseline_closed !== undefined ? Boolean(prev.baseline_closed) : !isOpen) : false,
+          booked_by: bookedBy
         });
       }
       renderTrainerSlotGeneratorModalContent();
@@ -3759,20 +4143,38 @@ function renderOnboardingScreen() {
         return;
       }
       s.is_open = !s.is_open;
+      s.baseline_closed = !s.is_open;
       renderTrainerSlotGeneratorModalContent();
     }
 
     async function applyTrainerGeneratedSchedule() {
       const iso = uiState.selectedTrainerScheduleDate;
-      appData.schedule_slots[iso] = draftGeneratorSlots.map(s => ({
+      const existingDaySlots = appData.schedule_slots[iso] || [];
+      const newSlots = draftGeneratorSlots.map(s => ({
         time: s.time,
         duration: 60,
-        is_open: s.is_open,
-        booked_by: s.booked_by
+        is_open: s.booked_by ? true : Boolean(s.is_open),
+        baseline_closed: s.booked_by ? Boolean(s.baseline_closed) : !Boolean(s.is_open),
+        booked_by: s.booked_by || null
       }));
+
+      existingDaySlots.forEach(oldSlot => {
+        if (oldSlot.booked_by && !newSlots.some(ns => ns.time === oldSlot.time)) {
+          newSlots.push({
+            time: oldSlot.time,
+            duration: oldSlot.duration || 60,
+            is_open: true,
+            baseline_closed: Boolean(oldSlot.baseline_closed),
+            booked_by: oldSlot.booked_by
+          });
+        }
+      });
+      newSlots.sort((a, b) => a.time.localeCompare(b.time));
+
+      appData.schedule_slots[iso] = newSlots;
+      await persistScheduleSlotsToSupabase();
       closeModal();
       renderApp();
-      await persistScheduleSlotsToSupabase();
       triggerHaptic('success');
       showToast(`Расписание на ${formatHumanDate(iso)} сохранено в облаке!`);
     }
@@ -3837,9 +4239,11 @@ function renderOnboardingScreen() {
         } else {
           const daySlots = appData.schedule_slots[isoDate] || [];
           daySlots.forEach(s => {
-            if (s.booked_by === studentId) {
+            if (String(s.booked_by) === String(studentId) || (st && String(s.booked_by) === String(st.id))) {
               s.booked_by = null;
-              s.is_open = true;
+              if (s.baseline_closed) {
+                s.is_open = false;
+              }
             }
           });
           st.active_bookings = st.active_bookings.filter(b => b.date !== isoDate);
@@ -3852,20 +4256,27 @@ function renderOnboardingScreen() {
           st.subscription.remaining = Math.max(0, total - used);
         }
       }
-      renderApp();
       if (supabaseClient) {
         try {
           if (cancelledBookingId && !String(cancelledBookingId).startsWith('bk-')) {
             await supabaseClient.from('bookings').delete().eq('id', cancelledBookingId);
           } else if (st) {
-            await supabaseClient.from('bookings').delete().eq('student_id', st.supabase_id || st.id).eq('session_date', isoDate);
+            const safeNumericId = toValidNumericIdOrNull(st.supabase_id || st.id);
+            if (safeNumericId) {
+              let delQ = supabaseClient.from('bookings').delete().eq('student_id', safeNumericId).eq('session_date', isoDate);
+              if (startTime) delQ = delQ.eq('session_time', startTime);
+              await delQ;
+            }
           }
           if (st) await persistStudentToSupabase(st);
           await persistScheduleSlotsToSupabase();
-        } catch (e) {}
+        } catch (e) {
+          console.warn('Ошибка отмены бронирования тренером в Supabase:', e);
+        }
       }
+      renderApp();
       triggerHaptic('warning');
-      showToast(`Тренировка ${st ? st.full_name : ''} отменена. Окно свободно.`);
+      showToast(`Тренировка ${st ? st.full_name : ''} отменена. Занятие возвращено на баланс.`);
     }
 
     async function toggleSingleTrainerHourQuick(isoDate, timeStr) {
@@ -3874,8 +4285,9 @@ function renderOnboardingScreen() {
       const slot = daySlots.find(s => s.time === timeStr);
       if (!slot || slot.booked_by) return;
       slot.is_open = !slot.is_open;
-      renderApp();
+      slot.baseline_closed = !slot.is_open;
       await persistScheduleSlotsToSupabase();
+      renderApp();
     }
 
     function renderTrainerScheduleTab() {
@@ -4177,10 +4589,8 @@ function renderOnboardingScreen() {
 
       appData.students.push(newStudent);
       copyInviteCode(customCode);
-      closeModal();
-      renderApp();
-
       await persistStudentToSupabase(newStudent);
+      closeModal();
       showToast(`Подопечный ${fio} создан и сохранён в облаке!`);
       renderApp();
     }
@@ -4209,21 +4619,21 @@ function renderOnboardingScreen() {
     }
 
     async function saveTrainerWorkoutReview(studentId, workoutId) {
-      const st = getStudentById(studentId);
+      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
       if (!st) return;
       const w = (st.workouts || []).find(item => item.id === workoutId);
       const commentEl = document.getElementById('trainer-workout-comment-input');
       if (w && commentEl) {
         w.trainer_comment = commentEl.value.trim();
-        renderApp();
         await persistStudentToSupabase(st);
         triggerHaptic('success');
         showToast('Комментарий к тренировке сохранён в облаке и виден подопечному!');
+        renderApp();
       }
     }
 
     function openTrainerAddAnthropometryModal(studentId) {
-      const st = getStudentById(studentId);
+      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
       if (!st) return;
       const list = (st.anthropometry || []).map(normalizeAnthropometryRecord);
       const last = list[list.length - 1] || { chest: 0, waist: 0, arms: 0 };
@@ -4248,7 +4658,7 @@ function renderOnboardingScreen() {
               <input id="tr-anth-arms" type="number" step="0.5" value="${last.arms || ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-xl px-3 py-2 text-xs font-bold text-white" />
             </div>
           </div>
-          <button onclick="saveTrainerAnthropometry('${studentId}')" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase shadow-neon">
+          <button onclick="saveTrainerAnthropometry('${st.access_code || studentId}')" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase shadow-neon">
             Сохранить замеры
           </button>
         </div>
@@ -4256,13 +4666,17 @@ function renderOnboardingScreen() {
     }
 
     async function saveTrainerAnthropometry(studentId) {
-      const st = getStudentById(studentId);
+      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
       if (!st) return;
-      const list = (st.anthropometry || []).map(normalizeAnthropometryRecord);
+      if (!Array.isArray(st.anthropometry)) st.anthropometry = [];
+      const list = st.anthropometry.map(normalizeAnthropometryRecord);
       const last = list[list.length - 1] || { chest: 0, waist: 0, arms: 0 };
-      const rawC = parseFloat(document.getElementById('tr-anth-chest').value);
-      const rawW = parseFloat(document.getElementById('tr-anth-waist').value);
-      const rawA = parseFloat(document.getElementById('tr-anth-arms').value);
+      const cEl = document.getElementById('tr-anth-chest');
+      const wEl = document.getElementById('tr-anth-waist');
+      const aEl = document.getElementById('tr-anth-arms');
+      const rawC = cEl ? parseFloat(String(cEl.value || '').replace(',', '.')) : NaN;
+      const rawW = wEl ? parseFloat(String(wEl.value || '').replace(',', '.')) : NaN;
+      const rawA = aEl ? parseFloat(String(aEl.value || '').replace(',', '.')) : NaN;
       const entry = {
         date: formatDotDate(formatISO(getTodayDateObj())),
         chest: !isNaN(rawC) ? rawC : last.chest,
@@ -4270,15 +4684,15 @@ function renderOnboardingScreen() {
         arms: !isNaN(rawA) ? rawA : last.arms
       };
       st.anthropometry.push(entry);
-      closeModal();
-      renderApp();
       await persistStudentToSupabase(st);
+      closeModal();
       triggerHaptic('success');
       showToast('Новые замеры (Грудные, Талия, Руки) сохранены в базе!');
+      renderApp();
     }
 
     async function adjustStudentRemainingBalance(studentId, delta) {
-      const st = getStudentById(studentId);
+      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
       if (!st || !st.subscription) return;
 
       syncTrainerManagementDraftFromDOM(st);
@@ -4307,14 +4721,14 @@ function renderOnboardingScreen() {
       st.subscription.used_sessions = currentUsed;
       st.subscription.remaining = remaining;
 
-      renderApp();
       await persistStudentToSupabase(st);
+      renderApp();
       triggerHaptic('light');
       showToast(`Баланс сохранён: осталось ${remaining} из ${total}`);
     }
 
     async function updateStudentTotalSubscription(studentId, totalVal) {
-      const st = getStudentById(studentId);
+      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
       if (!st || !st.subscription) return;
 
       syncTrainerManagementDraftFromDOM(st);
@@ -4329,20 +4743,20 @@ function renderOnboardingScreen() {
       st.subscription.used_sessions = currentUsed;
       st.subscription.remaining = remaining;
 
-      renderApp();
       await persistStudentToSupabase(st);
+      renderApp();
       showToast(`Пакет обновлён в базе: ${remaining} из ${newTotal} занятий`);
     }
 
     async function setStudentSessionDuration(studentId, durationMins) {
-      const st = getStudentById(studentId);
+      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
       if (!st) return;
 
       syncTrainerManagementDraftFromDOM(st);
 
       st.session_duration = Number(durationMins) || 60;
-      renderApp();
       await persistStudentToSupabase(st);
+      renderApp();
       triggerHaptic('light');
       showToast(`Длительность тренировки сохранена: ${formatDurationLabel(st.session_duration)}`);
     }
@@ -4386,44 +4800,54 @@ function renderOnboardingScreen() {
     }
 
     async function executeDeleteStudent(studentId) {
-      const st = getStudentById(studentId);
+      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
       if (!st) {
         closeModal();
         return;
       }
       const stName = st.full_name;
       const targetDbId = st.supabase_id || st.id;
+      const targetCode = (st.access_code || '').trim().toUpperCase();
 
-      // 1. Освобождаем слоты в расписании тренера
+      // 1. Освобождаем слоты в расписании тренера с учётом baseline_closed
       if (appData.schedule_slots) {
         Object.keys(appData.schedule_slots).forEach(dateKey => {
           (appData.schedule_slots[dateKey] || []).forEach(slot => {
-            if (slot.booked_by === studentId || slot.booked_by === st.id || slot.booked_by === targetDbId) {
+            if (String(slot.booked_by) === String(studentId) || String(slot.booked_by) === String(st.id) || String(slot.booked_by) === String(targetDbId)) {
               slot.booked_by = null;
-              slot.is_open = true;
+              if (slot.baseline_closed) {
+                slot.is_open = false;
+              }
             }
           });
         });
       }
 
       // 2. Удаляем из локального массива учеников
-      appData.students = (appData.students || []).filter(s => s.id !== studentId && s.id !== st.id && s.id !== targetDbId);
+      appData.students = (appData.students || []).filter(s => String(s.id) !== String(studentId) && String(s.id) !== String(st.id) && String(s.id) !== String(targetDbId) && (!targetCode || String(s.access_code).toUpperCase() !== targetCode));
 
       // Если удалили текущего выбранного студента, переключаем на первого доступного
-      if (appData.current_student_id === studentId || appData.current_student_id === targetDbId) {
+      if (String(appData.current_student_id) === String(studentId) || String(appData.current_student_id) === String(targetDbId)) {
         appData.current_student_id = appData.students[0] ? appData.students[0].id : null;
       }
 
       uiState.selectedTrainerStudentId = null;
       uiState.trainerStudentSubscreen = null;
 
-      // 3. Синхронизируем удаление с Supabase
-      if (typeof supabaseClient !== 'undefined' && supabaseClient && targetDbId && !String(targetDbId).startsWith('step-')) {
+      // 3. Синхронизируем удаление с Supabase (включая очистку student_reports по student_code)
+      if (typeof supabaseClient !== 'undefined' && supabaseClient) {
         try {
-          await supabaseClient.from('student_reports').delete().eq('student_id', targetDbId);
-          await supabaseClient.from('bookings').delete().eq('student_id', targetDbId);
-          await supabaseClient.from('subscriptions').delete().eq('student_id', targetDbId);
-          await supabaseClient.from('users').delete().eq('id', targetDbId);
+          if (targetCode) {
+            await supabaseClient.from('student_reports').delete().eq('student_code', targetCode);
+          }
+          const safeNumericId = toValidNumericIdOrNull(targetDbId);
+          if (safeNumericId) {
+            await supabaseClient.from('student_reports').delete().eq('student_id', safeNumericId);
+            await supabaseClient.from('bookings').delete().eq('student_id', safeNumericId);
+            await supabaseClient.from('subscriptions').delete().eq('student_id', safeNumericId);
+            await supabaseClient.from('users').delete().eq('id', safeNumericId);
+          }
+          await persistScheduleSlotsToSupabase();
         } catch (err) {
           console.warn('Ошибка удаления подопечного из Supabase:', err);
         }
@@ -4437,7 +4861,7 @@ function renderOnboardingScreen() {
     }
 
     async function saveTrainerManagementFinanceAndNotes(studentId) {
-      const st = (appData.students || []).find(s => String(s.id) === String(studentId));
+      const st = getStudentById(studentId) || appData.students.find(s => String(s.id) === String(studentId) || s.access_code === studentId);
       if (!st) return;
 
       syncTrainerManagementDraftFromDOM(st);
