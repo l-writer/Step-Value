@@ -4768,13 +4768,13 @@ function renderOnboardingScreen() {
             </button>
           </div>
 
-          <!-- 1. Длинная строка: ФИО -->
+          <!-- 1. ФИО -->
           <div>
             <label class="block text-[10px] font-semibold text-[#8B949E] mb-1">ФИО подопечного</label>
             <input id="new-st-name" type="text" placeholder="Максим Лебедев" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs font-bold text-white outline-none transition" />
           </div>
 
-          <!-- 2. Две короткие ячейки: Telegram и Стоимость -->
+          <!-- 2. Telegram и Стоимость -->
           <div class="grid grid-cols-2 gap-2">
             <div>
               <label class="block text-[10px] font-semibold text-[#8B949E] mb-1">Telegram (без @)</label>
@@ -4782,15 +4782,15 @@ function renderOnboardingScreen() {
             </div>
             <div>
               <label class="block text-[10px] font-semibold text-[#8B949E] mb-1">Стоимость (₽)</label>
-              <input id="new-student-price" type="number" placeholder="15000" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs font-bold text-white outline-none transition" />
+              <input id="new-st-price" type="number" placeholder="15000" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs font-bold text-white outline-none transition" />
             </div>
           </div>
 
-          <!-- 3. Две короткие ячейки: Пакет занятий и Длительность -->
+          <!-- 3. Стартовый пакет и Длительность -->
           <div class="grid grid-cols-2 gap-2">
             <div>
               <label class="block text-[10px] font-semibold text-[#8B949E] mb-1">Пакет занятий</label>
-              <input id="new-st-pack" type="number" min="0" max="100" placeholder="0" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs font-bold text-white outline-none transition" />
+              <input id="new-st-pack" type="number" min="0" max="100" placeholder="8" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs font-bold text-white outline-none transition" />
             </div>
             <div>
               <label class="block text-[10px] font-semibold text-[#8B949E] mb-1">Длительность</label>
@@ -4811,11 +4811,12 @@ function renderOnboardingScreen() {
           </div>
 
           <!-- 5. Кнопка создания -->
-          <button onclick="createNewStudentRecord()" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider shadow-neon active:scale-[0.99] transition">
+          <button type="button" onclick="createNewStudentRecord()" class="w-full py-3 rounded-xl bg-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider active:scale-[0.99] transition">
             Создать и скопировать приглашение
           </button>
         </div>
       `);
+      if (window.lucide) window.lucide.createIcons();
     }
 
     function copyTextSafe(text) {
@@ -4851,12 +4852,14 @@ function renderOnboardingScreen() {
     async function createNewStudentRecord() {
       const nameEl = document.getElementById('new-st-name');
       const userEl = document.getElementById('new-st-username');
-      const priceEl = document.getElementById('new-student-price');
+      const priceEl = document.getElementById('new-st-price');
+      const packEl = document.getElementById('new-st-pack');
+      const durEl = document.getElementById('new-st-dur');
       const codeEl = document.getElementById('new-st-code');
 
       const customCode = (codeEl ? codeEl.value.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') : '');
       if (!customCode) {
-        showToast('Укажите персональный код доступа!', 'error');
+        showToast('Укажите код доступа!', 'error');
         if (codeEl) codeEl.focus();
         return;
       }
@@ -4865,14 +4868,21 @@ function renderOnboardingScreen() {
       if (duplicate) {
         const errEl = document.getElementById('new-st-code-error');
         if (errEl) errEl.classList.remove('hidden');
-        showToast(`Код «${customCode}» уже занят другим подопечным! Задайте уникальный код.`, 'error');
+        showToast(`Код «${customCode}» уже занят!`, 'error');
         if (codeEl) codeEl.focus();
         return;
       }
 
       const fio = (nameEl ? nameEl.value.trim() : '') || 'Новый Подопечный';
       const cleanUser = (userEl ? userEl.value.trim() : '').replace(/^@/, '');
-      const subscriptionPrice = Number(priceEl ? priceEl.value : 0) || 0;
+      const rawPrice = priceEl ? Number(priceEl.value) : 0;
+      const subscriptionPrice = isNaN(rawPrice) ? 0 : Math.max(0, rawPrice);
+      
+      const rawPack = packEl ? parseInt(packEl.value, 10) : 0;
+      const pack = isNaN(rawPack) ? 0 : Math.max(0, rawPack);
+      
+      const dur = parseInt(durEl ? durEl.value : 60, 10) || 60;
+
       const parts = fio.split(' ');
       const initials = ((parts[0] ? parts[0][0] : 'А') + (parts[1] ? parts[1][0] : 'Т')).toUpperCase();
 
@@ -4884,17 +4894,17 @@ function renderOnboardingScreen() {
         full_name: fio,
         avatar: initials,
         status: 'active',
-        freeze_details: { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
+        freeze_details: { is_frozen: false, from: '', to: '' },
         price: subscriptionPrice,
-        session_duration: 60,
+        session_duration: dur,
         subscription: {
           id: null,
           price: subscriptionPrice,
-          total: 0,
-          total_sessions: 0,
+          total: pack,
+          total_sessions: pack,
           used: 0,
           used_sessions: 0,
-          remaining: 0,
+          remaining: pack,
           payment_day: 1,
           billing_day: 1,
           robokassa_sum: formatRublesFromNumber(subscriptionPrice),
@@ -4912,18 +4922,22 @@ function renderOnboardingScreen() {
         active_bookings: []
       };
 
+      if (!Array.isArray(appData.students)) {
+        appData.students = [];
+      }
       appData.students.push(newStudent);
+
+      // Сохраняем локально и в фоне отправляем в Supabase
       saveAppData();
       copyInviteCode(customCode);
       closeModal();
       renderApp();
-      showToast(`Подопечный ${fio} создан и сохранён!`);
+      showToast(`Подопечный ${fio} создан: ${pack} зан., ${subscriptionPrice} ₽`);
+
       try {
         await persistStudentToSupabase(newStudent);
-        saveAppData();
-        renderApp();
       } catch (err) {
-        console.warn('Фоновое сохранение подопечного в Supabase:', err);
+        console.warn('Ошибка отправки в Supabase:', err);
       }
     }
 
