@@ -2644,17 +2644,56 @@ function renderOnboardingScreen() {
       renderApp();
     }
 
-    function toggleExerciseVideoField(idx) {
-      triggerHaptic('light');
-      syncDraftWorkoutFromDOM();
-      if (!uiState.draftWorkout || !uiState.draftWorkout.exercises[idx]) return;
-      const row = uiState.draftWorkout.exercises[idx];
-      row.show_video_input = !row.show_video_input;
-      if (row.show_video_input && !row.video_url) {
-        row.video_url = 'https://t.me/step_value_video/set_' + (idx + 1);
+    async function handleExerciseVideoUpload(event, idx) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+
+  const d = uiState.draftWorkout;
+  const statusLabel = document.getElementById(`ex-video-status-${idx}`);
+  if (statusLabel) {
+    statusLabel.innerText = 'Загрузка...';
+    statusLabel.className = 'text-[11px] font-bold text-yellow-400';
+  }
+
+  try {
+    const student = (typeof getCurrentStudent === 'function') ? getCurrentStudent() : null;
+    const exName = d.exercises && d.exercises[idx] ? (d.exercises[idx].name || 'Упражнение') : 'Упражнение';
+    const caption = `🏋️ Подход: ${exName}\nУченик: ${student ? (student.full_name || student.name) : 'Подопечный'}`;
+
+    // Отправляем через созданную ранее функцию в Telegram
+    const uploadRes = await uploadVideoMediaToTelegram(file, caption);
+    
+    if (uploadRes && uploadRes.video_url) {
+      if (d.exercises && d.exercises[idx]) {
+        d.exercises[idx].video_url = uploadRes.video_url;
+        d.exercises[idx].video_file_id = uploadRes.file_id;
       }
+      if (typeof showToast === 'function') showToast('Видео подхода загружено в облако!');
+    }
+  } catch (err) {
+    console.error('Ошибка загрузки видео:', err);
+    if (typeof showToast === 'function') showToast('Ошибка при загрузке видео');
+  } finally {
+    if (typeof renderWorkoutEditor === 'function') {
+      renderWorkoutEditor();
+    } else if (typeof renderApp === 'function') {
       renderApp();
     }
+  }
+}
+
+function removeExerciseVideo(idx) {
+  const d = uiState.draftWorkout;
+  if (d && d.exercises && d.exercises[idx]) {
+    d.exercises[idx].video_url = '';
+    d.exercises[idx].video_file_id = null;
+    if (typeof renderWorkoutEditor === 'function') {
+      renderWorkoutEditor();
+    } else if (typeof renderApp === 'function') {
+      renderApp();
+    }
+  }
+}
 
     async function saveStudentWorkout() {
       syncDraftWorkoutFromDOM();
@@ -2783,17 +2822,21 @@ function renderOnboardingScreen() {
                       <label class="block text-[10px] text-[#8B949E] mb-1">Вес (кг)</label>
                       <input id="ex-weight-${idx}" type="number" step="0.5" min="0" value="${ex.weight !== 0 && ex.weight !== '0' ? ex.weight : ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-lg px-2.5 py-1.5 text-xs font-extrabold text-[#00E676] text-center outline-none focus:border-[#00E676]" />
                     </div>
-                    <button type="button" onclick="toggleExerciseVideoField(${idx})" class="py-1.5 px-2 rounded-lg border ${ex.video_url || ex.show_video_input ? 'bg-[#10B981]/20 border-[#00E676] text-[#00E676]' : 'bg-[#0D1117] border-[#30363D] text-[#8B949E]'} text-[11px] font-bold flex items-center justify-center gap-1 h-[34px] transition">
-                      <span>📎 Видео</span>
-                    </button>
-                  </div>
-
-                  ${(ex.show_video_input || ex.video_url) ? `
-                    <div class="pt-1 flex items-center gap-2">
-                      <i data-lucide="video" class="w-4 h-4 text-[#00E676] shrink-0"></i>
-                      <input id="ex-video-${idx}" type="text" value="${ex.video_url || ''}" placeholder="Ссылка или ID видео подхода для разбора техники..." class="flex-1 bg-[#090C10] border border-[#10B981]/50 rounded-lg px-2.5 py-1.5 text-[11px] text-white outline-none" />
-                    </div>
-                  ` : ''}
+                    <div class="flex items-center">
+            <label class="cursor-pointer py-1.5 px-3 rounded-lg border border-[#30363D] bg-[#161B22] hover:border-[#00E676]/60 flex items-center gap-1.5 transition-colors">
+              <i data-lucide="video" class="w-3.5 h-3.5 text-[#00E676]"></i>
+              <span id="ex-video-status-${idx}" class="text-[11px] font-bold ${ex.video_url ? 'text-[#00E676]' : 'text-gray-300'}">
+                ${ex.video_url ? 'Видео загружено' : 'Прикрепить видео'}
+              </span>
+              <input type="file" accept="video/*" class="hidden" onchange="handleExerciseVideoUpload(event, ${idx})" />
+            </label>
+            ${ex.video_url ? `
+              <button type="button" onclick="removeExerciseVideo(${idx})" class="ml-1.5 p-1 text-red-400 hover:text-red-300" title="Удалить видео">
+                <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+              </button>
+            ` : ''}
+          </div>
+        </div>
                 </div>
               `;
             }).join('')}
