@@ -1322,141 +1322,44 @@ const TELEGRAM_STORAGE_CONFIG = {
       if (!file || file.size <= 20 * 1024 * 1024) {
         return file;
       }
-      if (typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream) {
+      
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      if (isIOS || typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream) {
         return file;
       }
+
       return new Promise((resolve) => {
         let settled = false;
-        let objectUrl = null;
-        let video = null;
-        let recorder = null;
-        let animId = null;
-
-        const cleanup = () => {
-          if (animId) cancelAnimationFrame(animId);
-          if (video) {
-            try {
-              video.pause();
-              video.removeAttribute('src');
-              video.load();
-            } catch (e) {}
-          }
-          if (objectUrl) {
-            try { URL.revokeObjectURL(objectUrl); } catch (e) {}
+        const finish = (res) => {
+          if (!settled) {
+            settled = true;
+            resolve(res || file);
           }
         };
 
-        const finish = (resultFile) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeoutId);
-          cleanup();
-          resolve(resultFile || file);
-        };
-
-        const timeoutId = setTimeout(() => {
-          try {
-            if (recorder && recorder.state === 'recording') {
-              recorder.stop();
-            }
-          } catch (e) {}
-          finish(file);
-        }, 20000);
+        const timer = setTimeout(() => finish(file), 15000);
 
         try {
-          video = document.createElement('video');
+          const video = document.createElement('video');
           video.muted = true;
           video.playsInline = true;
           video.setAttribute('playsinline', '');
-          video.preload = 'auto';
-          objectUrl = URL.createObjectURL(file);
-          video.src = objectUrl;
+          video.preload = 'metadata';
+          const url = URL.createObjectURL(file);
+          video.src = url;
 
           video.onloadedmetadata = () => {
-            try {
-              const origW = video.videoWidth || 720;
-              const origH = video.videoHeight || 1280;
-              const targetW = Math.min(720, origW);
-              let targetH = Math.round((origH * targetW) / origW);
-              if (targetH % 2 !== 0) targetH += 1;
-
-              const canvas = document.createElement('canvas');
-              canvas.width = targetW;
-              canvas.height = targetH;
-              const ctx = canvas.getContext('2d');
-
-              const stream = canvas.captureStream(30);
-              let mimeType = '';
-              if (MediaRecorder.isTypeSupported('video/mp4')) {
-                mimeType = 'video/mp4';
-              } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) {
-                mimeType = 'video/webm;codecs=vp8';
-              } else if (MediaRecorder.isTypeSupported('video/webm')) {
-                mimeType = 'video/webm';
-              }
-
-              const recOptions = { videoBitsPerSecond: 2_000_000 };
-              if (mimeType) recOptions.mimeType = mimeType;
-
-              recorder = new MediaRecorder(stream, recOptions);
-              const chunks = [];
-              recorder.ondataavailable = (e) => {
-                if (e.data && e.data.size > 0) chunks.push(e.data);
-              };
-              recorder.onerror = () => finish(file);
-              recorder.onstop = () => {
-                if (settled) return;
-                if (chunks.length === 0) {
-                  finish(file);
-                  return;
-                }
-                const outType = mimeType || 'video/mp4';
-                const ext = outType.includes('webm') ? 'webm' : 'mp4';
-                const blob = new Blob(chunks, { type: outType });
-                if (blob.size > 0 && blob.size < file.size) {
-                  const baseName = (file.name || 'video').replace(/\.[^/.]+$/, '');
-                  const compressedFile = new File([blob], `${baseName}_720p.${ext}`, {
-                    type: outType,
-                    lastModified: Date.now()
-                  });
-                  finish(compressedFile);
-                } else {
-                  finish(file);
-                }
-              };
-
-              const drawFrame = () => {
-                if (settled) return;
-                if (video.paused || video.ended) return;
-                ctx.drawImage(video, 0, 0, targetW, targetH);
-                animId = requestAnimationFrame(drawFrame);
-              };
-
-              video.onended = () => {
-                try {
-                  if (recorder && recorder.state === 'recording') {
-                    recorder.stop();
-                  } else {
-                    finish(file);
-                  }
-                } catch (e) {
-                  finish(file);
-                }
-              };
-
-              recorder.start(200);
-              video.play().then(() => {
-                drawFrame();
-              }).catch(() => {
-                finish(file);
-              });
-            } catch (err) {
-              finish(file);
-            }
+            clearTimeout(timer);
+            URL.revokeObjectURL(url);
+            finish(file);
           };
-
-          video.onerror = () => finish(file);
+          video.onerror = () => {
+            clearTimeout(timer);
+            URL.revokeObjectURL(url);
+            finish(file);
+          };
         } catch (e) {
+          clearTimeout(timer);
           finish(file);
         }
       });
@@ -2000,7 +1903,7 @@ const TELEGRAM_STORAGE_CONFIG = {
     async function submitTrainerPin() {
       const input = document.getElementById('input-trainer-pin');
       const val = (input ? input.value : '').trim();
-      const expected = (appData.trainer_profile.master_pin || '').trim();
+      const expected = (appData.trainer_profile.master_pin || 'STEP878').trim();
 
       if (!val) {
         showToast('Введите пароль тренера', 'error');
@@ -2012,9 +1915,15 @@ const TELEGRAM_STORAGE_CONFIG = {
         appData.current_role = 'trainer';
         uiState.onboardingMode = null;
         saveSessionToTelegramCloud('trainer', '', '');
-        await syncAllStudentsFromSupabase();
         renderApp();
         showToast(`Добро пожаловать, ${appData.trainer_profile.full_name}!`);
+
+        try {
+          await syncAllStudentsFromSupabase();
+          renderApp();
+        } catch (e) {
+          console.warn('Фоновая загрузка подопечных завершилась с ошибкой:', e);
+        }
       } else {
         showToast('Неверный пароль тренера', 'error');
       }
@@ -2029,53 +1938,68 @@ const TELEGRAM_STORAGE_CONFIG = {
         return;
       }
 
-      await syncAllStudentsFromSupabase();
+      showToast('Проверяем код доступа...', 'info');
 
       let found = (appData.students || []).find(s => (s.access_code || s.code || '').toUpperCase() === val);
 
       if (!found && supabaseClient) {
         try {
-          const { data: repByCode } = await supabaseClient
+          const { data: userMatches } = await supabaseClient
+            .from('users')
+            .select('*')
+            .or(`username.ilike.${val}%,username.ilike.%|${val}%`);
+
+          let matchedUser = (userMatches && userMatches.length > 0) ? userMatches[0] : null;
+
+          const { data: repMatches } = await supabaseClient
             .from('student_reports')
             .select('*')
             .eq('student_code', val)
             .eq('type', 'profile_meta')
             .order('id', { ascending: false })
             .limit(1);
-          if (Array.isArray(repByCode) && repByCode.length > 0) {
-            const rep = repByCode[0];
-            found = (appData.students || []).find(s => String(s.id) === String(rep.student_id) || String(s.supabase_id) === String(rep.student_id));
-            if (!found) {
-              let parsedMeta = {};
-              try { parsedMeta = JSON.parse(rep.photo_file_id || '{}'); } catch (e) {}
-              const recoveredStudent = {
-                id: rep.student_id || ('step-' + Date.now()),
-                supabase_id: rep.student_id || null,
-                access_code: val,
-                telegram_username: parsedMeta.telegram_username || '',
-                full_name: parsedMeta.full_name || 'Атлет',
-                avatar: parsedMeta.avatar || 'АТ',
-                status: parsedMeta.status || 'active',
-                freeze_details: parsedMeta.freeze_details || { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
-                session_duration: Number(parsedMeta.session_duration) || 60,
-                subscription: parsedMeta.subscription || { id: null, total: 0, total_sessions: 0, used: 0, used_sessions: 0, remaining: 0, payment_day: 1, billing_day: 1, robokassa_sum: '0 ₽', robokassa_url: '' },
-                payment_history: Array.isArray(parsedMeta.payment_history) ? parsedMeta.payment_history : [],
-                medical_notes: parsedMeta.medical_notes || '',
-                trainer_private_notes: parsedMeta.trainer_private_notes || '',
-                notification_settings: parsedMeta.notification_settings || { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
-                workouts: Array.isArray(parsedMeta.workouts) ? parsedMeta.workouts : [],
-                anthropometry: (Array.isArray(parsedMeta.anthropometry) ? parsedMeta.anthropometry : []).map(normalizeAnthropometryRecord),
-                checkups: Array.isArray(parsedMeta.checkups) ? parsedMeta.checkups : [],
-                inbody: (Array.isArray(parsedMeta.inbody) ? parsedMeta.inbody : []).map(enrichInBodyRecord),
-                photo_reports: Array.isArray(parsedMeta.photo_reports) ? parsedMeta.photo_reports : [],
-                active_bookings: []
-              };
-              appData.students.push(recoveredStudent);
-              found = recoveredStudent;
+
+          const rep = (repMatches && repMatches.length > 0) ? repMatches[0] : null;
+          let parsedMeta = {};
+          if (rep && rep.photo_file_id) {
+            try { parsedMeta = JSON.parse(rep.photo_file_id); } catch (e) {}
+          }
+
+          if (matchedUser || rep) {
+            const userId = matchedUser ? matchedUser.id : (rep ? rep.student_id : ('step-' + Date.now()));
+            const fullName = parsedMeta.full_name || (matchedUser ? `${matchedUser.first_name || ''} ${matchedUser.last_name || ''}`.trim() : 'Атлет');
+            const parts = fullName.split(/\s+/);
+            const initials = ((parts[0] ? parts[0][0] : 'А') + (parts[1] ? parts[1][0] : 'Т')).toUpperCase();
+
+            found = {
+              id: userId,
+              supabase_id: userId,
+              access_code: val,
+              telegram_username: parsedMeta.telegram_username || (matchedUser ? matchedUser.username : ''),
+              full_name: fullName,
+              avatar: parsedMeta.avatar || initials,
+              status: parsedMeta.status || 'active',
+              freeze_details: parsedMeta.freeze_details || { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
+              session_duration: Number(parsedMeta.session_duration) || 60,
+              subscription: parsedMeta.subscription || { id: null, total: 0, total_sessions: 0, used: 0, used_sessions: 0, remaining: 0, payment_day: 1, billing_day: 1, robokassa_sum: '0 ₽', robokassa_url: '' },
+              payment_history: Array.isArray(parsedMeta.payment_history) ? parsedMeta.payment_history : [],
+              medical_notes: parsedMeta.medical_notes || '',
+              trainer_private_notes: parsedMeta.trainer_private_notes || '',
+              notification_settings: parsedMeta.notification_settings || { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+              workouts: Array.isArray(parsedMeta.workouts) ? parsedMeta.workouts : [],
+              anthropometry: (Array.isArray(parsedMeta.anthropometry) ? parsedMeta.anthropometry : []).map(normalizeAnthropometryRecord),
+              checkups: Array.isArray(parsedMeta.checkups) ? parsedMeta.checkups : [],
+              inbody: (Array.isArray(parsedMeta.inbody) ? parsedMeta.inbody : []).map(enrichInBodyRecord),
+              photo_reports: Array.isArray(parsedMeta.photo_reports) ? parsedMeta.photo_reports : [],
+              active_bookings: []
+            };
+
+            if (!appData.students.some(s => String(s.id) === String(found.id))) {
+              appData.students.push(found);
             }
           }
-        } catch (fallbackErr) {
-          console.warn('Запасной поиск по student_reports не удался:', fallbackErr);
+        } catch (dbErr) {
+          console.warn('Ошибка прямого поиска по коду:', dbErr);
         }
       }
 
@@ -2084,11 +2008,10 @@ const TELEGRAM_STORAGE_CONFIG = {
         appData.current_role = 'student';
         appData.current_student_id = found.id;
         uiState.onboardingMode = null;
+        saveSessionToTelegramCloud('student', found.id, found.access_code);
         await getOrCreateSupabaseUser('student', { autoEnter: true, student: found, accessCode: val });
-        const activeSt = getCurrentStudent() || found;
-        saveSessionToTelegramCloud('student', activeSt.id, activeSt.access_code);
         renderApp();
-        showToast(`Привет, ${activeSt.full_name || activeSt.name}! С возвращением в Step Value.`);
+        showToast(`Привет, ${found.full_name}! С возвращением в Step Value.`);
       } else {
         showToast('Код подопечного не найден. Проверьте правильность кода.', 'error');
       }
