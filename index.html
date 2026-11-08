@@ -2822,16 +2822,16 @@ function removeExerciseVideo(idx) {
                       <label class="block text-[10px] text-[#8B949E] mb-1">Вес (кг)</label>
                       <input id="ex-weight-${idx}" type="number" step="0.5" min="0" value="${ex.weight !== 0 && ex.weight !== '0' ? ex.weight : ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-lg px-2.5 py-1.5 text-xs font-extrabold text-[#00E676] text-center outline-none focus:border-[#00E676]" />
                     </div>
-                    <div class="flex items-center gap-1.5 w-full">
-            <label class="cursor-pointer flex-1 h-[38px] px-2 rounded-xl border border-[#30363D] bg-[#161B22] hover:border-[#00E676]/60 flex items-center justify-center gap-1.5 transition-colors shrink min-w-0">
-              <i data-lucide="video" class="w-3.5 h-3.5 text-[#00E676] shrink-0"></i>
-              <span id="ex-video-status-${idx}" class="text-[10px] font-bold truncate ${ex.video_url ? 'text-[#00E676]' : 'text-gray-300'}">
-                ${ex.video_url ? 'Загружено' : 'Видео'}
+                    <div class="flex items-center gap-1 w-full">
+            <label class="cursor-pointer flex-1 h-[38px] px-1.5 rounded-xl border ${ex.video_url ? 'border-[#00E676]/40 bg-[#00E676]/10' : 'border-[#30363D] bg-[#161B22]'} hover:border-[#00E676]/60 flex items-center justify-center gap-1 transition-colors shrink min-w-0">
+              <i data-lucide="${ex.video_url ? 'check' : 'video'}" class="w-3.5 h-3.5 ${ex.video_url ? 'text-[#00E676]' : 'text-[#8B949E]'} shrink-0"></i>
+              <span id="ex-video-status-${idx}" class="text-[10px] font-bold whitespace-nowrap ${ex.video_url ? 'text-[#00E676]' : 'text-gray-300'}">
+                ${ex.video_url ? 'Видео' : '+ Видео'}
               </span>
               <input type="file" accept="video/*" class="hidden" onchange="handleExerciseVideoUpload(event, ${idx})" />
             </label>
             ${ex.video_url ? `
-              <button type="button" onclick="removeExerciseVideo(${idx})" class="h-[38px] w-8 flex items-center justify-center shrink-0 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 hover:text-red-300" title="Удалить видео">
+              <button type="button" onclick="removeExerciseVideo(${idx})" class="h-[38px] w-7 flex items-center justify-center shrink-0 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 hover:text-red-300" title="Удалить видео">
                 <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
               </button>
             ` : ''}
