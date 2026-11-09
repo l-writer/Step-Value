@@ -113,7 +113,7 @@
       }
     }
 
-    async function persistStudentToSupabase(st) {
+    async function syncStudentToCloud(st) {
       if (!supabaseClient || !st) return false;
       try {
         if (!st.subscription) st.subscription = {};
@@ -130,10 +130,11 @@
 
         if (isLocalTempId) {
           try {
+            const safeTgId = (Date.now() % 1000000000) + 1;
             const { data: createdUser, error: createErr } = await supabaseClient
               .from('users')
               .insert([{
-                telegram_id: Date.now(),
+                telegram_id: safeTgId,
                 first_name: firstName,
                 last_name: lastName,
                 username: encodedUsername,
@@ -151,18 +152,19 @@
               if (uiState.selectedTrainerStudentId === oldId) uiState.selectedTrainerStudentId = targetUserId;
             }
           } catch (userInsertErr) {
-            console.warn('Предупреждение при создании записи в users (сохраняем profile_meta):', userInsertErr);
+            console.warn('Предупреждение при создании users:', userInsertErr);
           }
         } else {
-          const { error: userUpdErr } = await supabaseClient
-            .from('users')
-            .update({
-              first_name: firstName,
-              last_name: lastName,
-              username: encodedUsername
-            })
-            .eq('id', targetUserId);
-          if (userUpdErr) {
+          try {
+            await supabaseClient
+              .from('users')
+              .update({
+                first_name: firstName,
+                last_name: lastName,
+                username: encodedUsername
+              })
+              .eq('id', targetUserId);
+          } catch (userUpdErr) {
             console.warn('Предупреждение при обновлении users:', userUpdErr);
           }
         }
@@ -192,8 +194,8 @@
 
         const safeNumericTargetId = toValidNumericIdOrNull(targetUserId);
 
-        try {
-          if (safeNumericTargetId) {
+        if (safeNumericTargetId) {
+          try {
             const coreSubPayload = {
               student_id: safeNumericTargetId,
               total_sessions: Number(totalSessions) || 0,
@@ -219,111 +221,123 @@
             }
 
             if (subId) {
-              const { data: updSub, error: subUpdErr } = await supabaseClient
+              const { data: updSub } = await supabaseClient
                 .from('subscriptions')
                 .update(coreSubPayload)
                 .eq('id', subId)
                 .select()
                 .maybeSingle();
-
-              if (subUpdErr) {
-                console.warn('Предупреждение при обновлении subscriptions:', subUpdErr);
-              } else if (updSub) {
-                currentSubscription = updSub;
-              }
+              if (updSub) currentSubscription = updSub;
             } else {
-              const { data: insSub, error: subInsErr } = await supabaseClient
+              const { data: insSub } = await supabaseClient
                 .from('subscriptions')
                 .insert([coreSubPayload])
                 .select()
                 .maybeSingle();
-
-              if (subInsErr) {
-                console.warn('Предупреждение при создании subscriptions:', subInsErr);
-              } else if (insSub) {
+              if (insSub) {
                 st.subscription.id = insSub.id;
                 currentSubscription = insSub;
               }
             }
+          } catch (subWrapErr) {
+            console.warn('Изолированная ошибка subscriptions:', subWrapErr);
           }
-        } catch (subWrapErr) {
-          console.warn('Изолированная ошибка работы с таблицей subscriptions:', subWrapErr);
         }
 
-        try {
-          const safePhotoReports = (Array.isArray(st.photo_reports) ? st.photo_reports : []).map(pr => ({
-            date: pr.date || getCurrentMonthYearLabel(),
-            front_file_id: pr.front_file_id || '',
-            side_file_id: pr.side_file_id || '',
-            back_file_id: pr.back_file_id || '',
-            front_custom: Boolean(pr.front_custom),
-            side_custom: Boolean(pr.side_custom),
-            back_custom: Boolean(pr.back_custom),
-            front_url: (pr.front_url && String(pr.front_url).length < 40000) ? pr.front_url : '',
-            side_url: (pr.side_url && String(pr.side_url).length < 40000) ? pr.side_url : '',
-            back_url: (pr.back_url && String(pr.back_url).length < 40000) ? pr.back_url : ''
-          }));
+        const safePhotoReports = (Array.isArray(st.photo_reports) ? st.photo_reports : []).map(pr => ({
+          date: pr.date || getCurrentMonthYearLabel(),
+          front_file_id: pr.front_file_id || '',
+          side_file_id: pr.side_file_id || '',
+          back_file_id: pr.back_file_id || '',
+          front_custom: Boolean(pr.front_custom),
+          side_custom: Boolean(pr.side_custom),
+          back_custom: Boolean(pr.back_custom),
+          front_url: (pr.front_url && String(pr.front_url).length < 40000) ? pr.front_url : '',
+          side_url: (pr.side_url && String(pr.side_url).length < 40000) ? pr.side_url : '',
+          back_url: (pr.back_url && String(pr.back_url).length < 40000) ? pr.back_url : ''
+        }));
 
-          const metaObject = {
-            access_code: cleanCode,
-            telegram_username: cleanTg,
-            full_name: fullName,
-            avatar: st.avatar || 'АТ',
-            status: st.status || 'active',
+        const metaObject = {
+          id: st.id,
+          supabase_id: st.supabase_id || null,
+          access_code: cleanCode,
+          telegram_username: cleanTg,
+          full_name: fullName,
+          avatar: st.avatar || 'АТ',
+          status: st.status || 'active',
+          price: subscriptionPrice,
+          session_duration: Number(durationMins) || 60,
+          freeze_details: st.freeze_details || { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
+          subscription: {
+            id: st.subscription.id || null,
             price: subscriptionPrice,
-            session_duration: Number(durationMins) || 60,
-            freeze_details: st.freeze_details || { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
-            subscription: {
-              id: st.subscription.id || null,
-              price: subscriptionPrice,
-              total: Number(totalSessions) || 0,
-              total_sessions: Number(totalSessions) || 0,
-              used: Number(usedSessions) || 0,
-              used_sessions: Number(usedSessions) || 0,
-              remaining: Number(remainingSessions) || 0,
-              payment_day: Number(billingDay) || 1,
-              billing_day: Number(billingDay) || 1,
-              robokassa_sum: robokassaSum,
-              robokassa_url: robokassaUrl
-            },
-            payment_history: Array.isArray(st.payment_history) ? st.payment_history : [],
-            medical_notes: st.medical_notes || '',
-            trainer_private_notes: st.trainer_private_notes || '',
-            notification_settings: st.notification_settings || { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
-            workouts: Array.isArray(st.workouts) ? st.workouts : [],
-            anthropometry: Array.isArray(st.anthropometry) ? st.anthropometry : [],
-            checkups: Array.isArray(st.checkups) ? st.checkups : [],
-            inbody: Array.isArray(st.inbody) ? st.inbody : [],
-            photo_reports: safePhotoReports
-          };
+            total: Number(totalSessions) || 0,
+            total_sessions: Number(totalSessions) || 0,
+            used: Number(usedSessions) || 0,
+            used_sessions: Number(usedSessions) || 0,
+            remaining: Number(remainingSessions) || 0,
+            payment_day: Number(billingDay) || 1,
+            billing_day: Number(billingDay) || 1,
+            robokassa_sum: robokassaSum,
+            robokassa_url: robokassaUrl
+          },
+          payment_history: Array.isArray(st.payment_history) ? st.payment_history : [],
+          medical_notes: st.medical_notes || '',
+          trainer_private_notes: st.trainer_private_notes || '',
+          notification_settings: st.notification_settings || { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+          workouts: Array.isArray(st.workouts) ? st.workouts : [],
+          anthropometry: Array.isArray(st.anthropometry) ? st.anthropometry : [],
+          checkups: Array.isArray(st.checkups) ? st.checkups : [],
+          inbody: Array.isArray(st.inbody) ? st.inbody : [],
+          photo_reports: safePhotoReports,
+          active_bookings: Array.isArray(st.active_bookings) ? st.active_bookings : []
+        };
 
-          if (cleanCode) {
-            await supabaseClient
-              .from('student_reports')
-              .delete()
-              .eq('student_code', cleanCode)
-              .eq('type', 'profile_meta');
-          }
-          if (safeNumericTargetId) {
-            await supabaseClient
-              .from('student_reports')
-              .delete()
-              .eq('student_id', safeNumericTargetId)
-              .eq('type', 'profile_meta');
-          }
+        const jsonSnapshot = JSON.stringify(metaObject);
 
-          await supabaseClient
+        let existingReport = null;
+        if (cleanCode) {
+          const { data } = await supabaseClient
+            .from('student_reports')
+            .select('id')
+            .eq('type', 'profile_meta')
+            .eq('student_code', cleanCode)
+            .limit(1);
+          if (Array.isArray(data) && data.length > 0) existingReport = data[0];
+        }
+        if (!existingReport && safeNumericTargetId) {
+          const { data } = await supabaseClient
+            .from('student_reports')
+            .select('id')
+            .eq('type', 'profile_meta')
+            .eq('student_id', safeNumericTargetId)
+            .limit(1);
+          if (Array.isArray(data) && data.length > 0) existingReport = data[0];
+        }
+
+        if (existingReport && existingReport.id) {
+          const { error: updErr } = await supabaseClient
+            .from('student_reports')
+            .update({
+              student_id: safeNumericTargetId,
+              student_code: cleanCode || 'N/A',
+              photo_file_id: jsonSnapshot,
+              telegram_msg_id: 0
+            })
+            .eq('id', existingReport.id);
+          if (updErr) console.warn('Предупреждение update student_reports:', updErr);
+        } else {
+          const { error: insErr } = await supabaseClient
             .from('student_reports')
             .insert([{
               student_id: safeNumericTargetId,
               student_code: cleanCode || 'N/A',
               type: 'profile_meta',
-              photo_file_id: JSON.stringify(metaObject),
+              photo_file_id: jsonSnapshot,
               telegram_msg_id: 0,
               created_at: new Date().toISOString()
             }]);
-        } catch (metaErr) {
-          console.warn('Не удалось записать profile_meta в student_reports:', metaErr);
+          if (insErr) console.warn('Предупреждение insert student_reports:', insErr);
         }
 
         return true;
@@ -332,6 +346,7 @@
         return false;
       }
     }
+    const persistStudentToSupabase = syncStudentToCloud;
 
     function syncSupabaseStateToLocalApp(user, sub, bookings, preferredStudentId = null, profileMeta = null) {
       if (typeof appData === 'undefined' || !appData || !Array.isArray(appData.students)) return;
@@ -1364,26 +1379,23 @@ const TELEGRAM_STORAGE_CONFIG = {
       };
     }
     async function compressVideoFile(file) {
-      const isIOSorMobile = /iPad|iPhone|iPod|Android|Mobile/i.test(navigator.userAgent);
-      if (!file || file.size < 25 * 1024 * 1024 || isIOSorMobile) {
-        return file;
-      }
       return file;
     }
 
     async function uploadVideoMediaToTelegram(file, captionText = '') {
       if (file && file.size > 50 * 1024 * 1024) {
-        throw new Error('Файл больше 50 МБ (лимит Telegram). Обрежьте ролик.');
+        showToast('Файл больше 50 МБ (лимит Telegram). Обрежьте видео или уменьшите качество', 'error');
+        throw new Error('Файл больше 50 МБ (лимит Telegram). Обрежьте видео или уменьшите качество');
       }
 
       const formData = new FormData();
       formData.append('chat_id', TELEGRAM_STORAGE_CONFIG.channelId);
-      formData.append('document', file);
+      formData.append('video', file);
       if (captionText) {
         formData.append('caption', captionText);
       }
 
-      const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_STORAGE_CONFIG.botToken}/sendDocument`, {
+      const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_STORAGE_CONFIG.botToken}/sendVideo`, {
         method: 'POST',
         body: formData
       });
@@ -1393,7 +1405,7 @@ const TELEGRAM_STORAGE_CONFIG = {
         throw new Error(result.description || 'Ошибка Telegram');
       }
 
-      const videoObj = result.result.document || result.result.video;
+      const videoObj = result.result.video || result.result.document;
       const rawChannelId = String(TELEGRAM_STORAGE_CONFIG.channelId).replace(/^-100/, '');
       const tgPostUrl = `https://t.me/c/${rawChannelId}/${result.result.message_id}`;
 
@@ -1550,90 +1562,103 @@ const TELEGRAM_STORAGE_CONFIG = {
       });
     }
 
-    function loadAppData() {
-      appData = buildInitialSeedData();
+    async function loadAppData() {
+      if (!appData) {
+        appData = buildInitialSeedData();
+        appState = appData;
+      }
+
+      // Мгновенно восстанавливаем учеников и расписание из локального кэша
       try {
-        if (typeof localStorage !== 'undefined') {
-          const cached = localStorage.getItem('sv_app_cache_v1');
-          if (cached) {
-            const parsed = JSON.parse(cached);
-            if (parsed && typeof parsed === 'object') {
-              if (Array.isArray(parsed.students) && parsed.students.length > 0) {
-                appData.students = parsed.students;
-              }
-              if (parsed.schedule_slots && typeof parsed.schedule_slots === 'object') {
-                appData.schedule_slots = { ...appData.schedule_slots, ...parsed.schedule_slots };
-              }
-            }
-          }
-          const savedRole = localStorage.getItem('sv_role');
-          const savedStudentId = localStorage.getItem('sv_student_id');
-          const savedAccessCode = (localStorage.getItem('sv_access_code') || '').trim().toUpperCase();
-          if (savedRole === 'trainer') {
-            appData.current_role = 'trainer';
-          } else if (savedRole === 'student') {
-            appData.current_role = 'student';
-            let matched = (appData.students || []).find(s =>
-              (savedStudentId && String(s.id) === String(savedStudentId)) ||
-              (savedAccessCode && String(s.access_code || '').toUpperCase() === savedAccessCode)
-            );
-            if (!matched && (savedAccessCode || savedStudentId)) {
-              matched = {
-                id: savedStudentId || ('step-' + Date.now()),
-                supabase_id: toValidNumericIdOrNull(savedStudentId),
-                access_code: savedAccessCode || 'STEP-104',
-                telegram_username: '',
-                full_name: 'Атлет',
-                avatar: 'АТ',
-                status: 'active',
-                price: 0,
-                session_duration: 60,
-                freeze_details: { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
-                subscription: { id: null, price: 0, total: 0, total_sessions: 0, used: 0, used_sessions: 0, remaining: 0, payment_day: 1, billing_day: 1, robokassa_sum: '0 ₽', robokassa_url: '' },
-                payment_history: [],
-                medical_notes: '',
-                trainer_private_notes: '',
-                notification_settings: { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
-                workouts: [],
-                anthropometry: [],
-                checkups: [],
-                inbody: [],
-                photo_reports: [],
-                active_bookings: []
-              };
-              appData.students.push(matched);
-            }
-            if (matched) {
-              appData.current_student_id = matched.id;
-            }
+        const cachedStudents = localStorage.getItem('sv_cached_students');
+        if (cachedStudents) {
+          const parsed = JSON.parse(cachedStudents);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            appData.students = parsed;
           }
         }
-      } catch (e) {
-        console.warn('localStorage loadAppData fallback:', e);
+        const cachedSchedule = localStorage.getItem('sv_cached_schedule');
+        if (cachedSchedule) {
+          const parsedSched = JSON.parse(cachedSchedule);
+          if (parsedSched && typeof parsedSched === 'object') {
+            appData.schedule_slots = parsedSched;
+          }
+        }
+      } catch (e) {}
+
+      if (!supabaseClient) return;
+      try {
+        const [reportsRes, schedRes] = await Promise.allSettled([
+          supabaseClient.from('student_reports').select('*').eq('type', 'profile_meta'),
+          supabaseClient.from('student_reports').select('*').eq('type', 'schedule_meta').eq('student_code', 'TRAINER_SCHEDULE').order('id', { ascending: false }).limit(1)
+        ]);
+
+        if (reportsRes.status === 'fulfilled' && !reportsRes.value.error && Array.isArray(reportsRes.value.data)) {
+          const loadedStudents = [];
+          const seen = new Set();
+          reportsRes.value.data.forEach(r => {
+            try {
+              const parsed = JSON.parse(r.photo_file_id || '{}');
+              const code = String(r.student_code || parsed.access_code || '').trim().toUpperCase();
+              if (code && code !== 'N/A') {
+                parsed.access_code = code;
+              }
+              if (r.student_id) {
+                parsed.supabase_id = r.student_id;
+                if (!parsed.id) parsed.id = r.student_id;
+              }
+              const key = code || String(parsed.id || r.id);
+              if (!seen.has(key)) {
+                seen.add(key);
+                loadedStudents.push(parsed);
+              }
+            } catch (e) {
+              console.warn('Ошибка парсинга профиля подопечного:', e);
+            }
+          });
+          if (loadedStudents.length > 0) {
+            appData.students = loadedStudents;
+          }
+        }
+
+        if (schedRes.status === 'fulfilled' && !schedRes.value.error && Array.isArray(schedRes.value.data) && schedRes.value.data.length > 0) {
+          const rawSched = schedRes.value.data[0].photo_file_id;
+          if (rawSched) {
+            try {
+              const parsedSchedule = JSON.parse(rawSched);
+              if (parsedSchedule && typeof parsedSchedule === 'object') {
+                Object.keys(parsedSchedule).forEach(dateKey => {
+                  if (Array.isArray(parsedSchedule[dateKey])) {
+                    appData.schedule_slots[dateKey] = parsedSchedule[dateKey].map(s => ({
+                      time: s.time,
+                      duration: Number(s.duration) || 60,
+                      is_open: Boolean(s.is_open),
+                      baseline_closed: s.baseline_closed !== undefined ? Boolean(s.baseline_closed) : !Boolean(s.is_open),
+                      booked_by: null
+                    }));
+                  }
+                });
+              }
+            } catch (e) {}
+          }
+        }
+      } catch (err) {
+        console.warn('Фоновая загрузка Supabase:', err);
       }
-      appState = appData;
+
       migrateLoadedData();
     }
 
     function saveAppData() {
       try {
-        if (typeof localStorage !== 'undefined' && appData) {
-          const compactStudents = (appData.students || []).map(st => ({
-            ...st,
-            photo_reports: (Array.isArray(st.photo_reports) ? st.photo_reports : []).map(pr => ({
-              ...pr,
-              front_url: (pr.front_url && String(pr.front_url).length < 40000) ? pr.front_url : '',
-              side_url: (pr.side_url && String(pr.side_url).length < 40000) ? pr.side_url : '',
-              back_url: (pr.back_url && String(pr.back_url).length < 40000) ? pr.back_url : ''
-            }))
-          }));
-          localStorage.setItem('sv_app_cache_v1', JSON.stringify({
-            students: compactStudents,
-            schedule_slots: appData.schedule_slots || {}
-          }));
+        if (appData && Array.isArray(appData.students)) {
+          localStorage.setItem('sv_cached_students', JSON.stringify(appData.students));
+        }
+        if (appData && appData.schedule_slots) {
+          localStorage.setItem('sv_cached_schedule', JSON.stringify(appData.schedule_slots));
         }
       } catch (e) {
-        console.warn('localStorage saveAppData fallback:', e);
+        console.warn('Ошибка сохранения в localStorage:', e);
       }
     }
 
@@ -1683,9 +1708,51 @@ const TELEGRAM_STORAGE_CONFIG = {
       }
     }
 
+    function getFallbackStudent(id = 'step-default', code = 'STEP-104') {
+      return {
+        id: id || ('step-' + Date.now()),
+        supabase_id: null,
+        access_code: code || 'STEP-104',
+        telegram_username: '',
+        full_name: 'Атлет',
+        avatar: 'АТ',
+        status: 'active',
+        price: 0,
+        session_duration: 60,
+        freeze_details: { is_frozen: false, from: '', to: '' },
+        subscription: { id: null, price: 0, total: 8, total_sessions: 8, used: 0, used_sessions: 0, remaining: 8, payment_day: 1, billing_day: 1, robokassa_sum: '0 ₽', robokassa_url: '' },
+        payment_history: [],
+        medical_notes: '',
+        trainer_private_notes: '',
+        notification_settings: { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+        workouts: [],
+        anthropometry: [],
+        checkups: [],
+        inbody: [],
+        photo_reports: [],
+        active_bookings: []
+      };
+    }
+
     function getCurrentStudent() {
-      if (!appData || !Array.isArray(appData.students) || appData.students.length === 0) return null;
-      return appData.students.find(s => String(s.id) === String(appData.current_student_id) || (s.supabase_id && String(s.supabase_id) === String(appData.current_student_id))) || appData.students[0];
+      if (!appData) return null;
+      if (!Array.isArray(appData.students)) appData.students = [];
+      let found = null;
+      if (appData.students.length > 0) {
+        found = appData.students.find(s =>
+          String(s.id) === String(appData.current_student_id) ||
+          (s.supabase_id && String(s.supabase_id) === String(appData.current_student_id)) ||
+          (s.access_code && String(s.access_code).toUpperCase() === String(appData.current_student_id).toUpperCase())
+        ) || appData.students[0];
+      }
+      if (!found && appData.current_role === 'student') {
+        const savedCode = (typeof localStorage !== 'undefined' ? (localStorage.getItem('sv_access_code') || '') : '').trim().toUpperCase();
+        const savedId = (typeof localStorage !== 'undefined' ? (localStorage.getItem('sv_student_id') || '') : '').trim();
+        found = getFallbackStudent(savedId || 'step-default', savedCode || 'STEP-104');
+        appData.students.push(found);
+        appData.current_student_id = found.id;
+      }
+      return found;
     }
 
     function getStudentById(id) {
@@ -1937,7 +2004,7 @@ const TELEGRAM_STORAGE_CONFIG = {
                 settled = true;
                 resolve(null);
               }
-            }, 1200);
+            }, 250);
             try {
               cs.getItems(['sv_role', 'sv_student_id', 'sv_access_code'], (err, values) => {
                 if (!settled) {
@@ -2097,18 +2164,18 @@ const TELEGRAM_STORAGE_CONFIG = {
         return;
       }
 
-      // 1. Поиск в локальном массиве
+      // 1. Поиск в памяти appData.students
       let student = (appData.students || []).find(s => (s.access_code || '').trim().toUpperCase() === val);
 
-      // 2. Если в локальной памяти нет — прямой запрос в Supabase
+      // 2. Если массив пуст или студент не найден — прямой резервный запрос в Supabase
       if (!student && supabaseClient) {
         try {
-          const { data: reports } = await supabaseClient
+          const { data: reports, error } = await supabaseClient
             .from('student_reports')
             .select('*')
             .eq('type', 'profile_meta');
 
-          if (Array.isArray(reports)) {
+          if (!error && Array.isArray(reports)) {
             for (const r of reports) {
               try {
                 const parsed = JSON.parse(r.photo_file_id || '{}');
@@ -2116,8 +2183,8 @@ const TELEGRAM_STORAGE_CONFIG = {
                 if (parsedCode === val) {
                   student = {
                     ...parsed,
-                    id: r.student_id || ('step-' + Date.now()),
-                    supabase_id: r.student_id || null,
+                    id: r.student_id || parsed.id || ('step-' + Date.now()),
+                    supabase_id: r.student_id || parsed.supabase_id || null,
                     access_code: parsedCode
                   };
                   if (!appData.students) appData.students = [];
@@ -2132,9 +2199,9 @@ const TELEGRAM_STORAGE_CONFIG = {
         }
       }
 
-      // 3. Если код не существует
+      // 3. Если код отсутствует в базе
       if (!student) {
-        showToast(`Подопечный с кодом «${val}» не найден`, 'error');
+        showToast('Подопечный с таким кодом не найден', 'error');
         return;
       }
 
@@ -2549,7 +2616,8 @@ function renderOnboardingScreen() {
     }
 
     function renderStudentBookingTab() {
-      const student = getCurrentStudent();
+      const student = getCurrentStudent() || getFallbackStudent();
+      if (!student.subscription) student.subscription = { total: 8, remaining: 8, used: 0, payment_day: 1, robokassa_sum: '0 ₽', robokassa_url: '' };
       const sub = student.subscription;
       const now = new Date();
       const allBookings = student.active_bookings || [];
@@ -2899,6 +2967,12 @@ function renderOnboardingScreen() {
       const file = event.target.files && event.target.files[0];
       if (!file) return;
 
+      if (file.size > 50 * 1024 * 1024) {
+        showToast('Файл больше 50 МБ (лимит Telegram). Обрежьте видео или уменьшите качество', 'error');
+        event.target.value = '';
+        return;
+      }
+
       syncDraftWorkoutFromDOM();
 
       const d = uiState.draftWorkout;
@@ -3107,7 +3181,7 @@ function renderOnboardingScreen() {
     }
 
     function renderStudentWorkoutsTab() {
-      const student = getCurrentStudent();
+      const student = getCurrentStudent() || getFallbackStudent();
       refreshStudentExercisesDatalist();
 
       if (uiState.workoutEditorOpen && uiState.draftWorkout) {
@@ -3811,7 +3885,7 @@ function renderOnboardingScreen() {
     }
 
     function renderStudentReportsTab() {
-      const student = getCurrentStudent();
+      const student = getCurrentStudent() || getFallbackStudent();
       const sub = uiState.studentReportSubscreen;
 
       if (sub === 'inbody') {
@@ -4232,7 +4306,10 @@ function renderOnboardingScreen() {
 
     // П.15: Сетка дат заморозки в Профиле (h-auto, p-4 pb-5, grid grid-cols-2 gap-3 mt-3 w-full) и 24ч окно оплаты
     function renderStudentProfileTab() {
-      const student = getCurrentStudent();
+      const student = getCurrentStudent() || getFallbackStudent();
+      if (!student.subscription) student.subscription = { total: 8, remaining: 8, used: 0, payment_day: 1, robokassa_sum: '0 ₽', robokassa_url: '' };
+      if (!student.freeze_details) student.freeze_details = { is_frozen: false, from: '', to: '' };
+      if (!student.notification_settings) student.notification_settings = { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true };
       const sub = student.subscription;
       const fr = student.freeze_details;
       const notif = student.notification_settings;
@@ -4259,7 +4336,8 @@ function renderOnboardingScreen() {
             </div>
 
             <button type="button" onclick="openTelegramChat('${appData.trainer_profile.telegram_username || ''}')" class="w-full py-2.5 rounded-xl bg-[#1F242C] hover:bg-[#30363D] border border-[#10B981]/50 text-xs font-bold text-[#00E676] flex items-center justify-center gap-2 transition">
-              <span>💬 Написать тренеру</span>
+              <i data-lucide="send" class="w-4 h-4 text-[#00E676]"></i>
+              <span>Написать тренеру</span>
             </button>
           </div>
 
@@ -4795,10 +4873,10 @@ function renderOnboardingScreen() {
             <div>
               <label class="block text-[10px] font-semibold text-[#8B949E] mb-1">Длительность</label>
               <select id="new-st-dur" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-2.5 py-2 text-xs font-bold text-white outline-none transition">
-                <option value="60">1 час (60 мин)</option>
-                <option value="90">1.5 часа (90 мин)</option>
-                <option value="120" selected>2 часа (120 мин)</option>
-                <option value="180">3 часа (180 мин)</option>
+                <option value="60">60 мин</option>
+                <option value="90">90 мин</option>
+                <option value="120" selected>120 мин</option>
+                <option value="180">180 мин</option>
               </select>
             </div>
           </div>
@@ -4818,126 +4896,146 @@ function renderOnboardingScreen() {
       `);
       if (window.lucide) window.lucide.createIcons();
     }
+    
+function copyInviteCode(code, name = '') {
+      const cleanCode = String(code || '').trim().toUpperCase();
+      const studentName = String(name || '').trim();
+      const inviteText = `Привет${studentName ? ', ' + studentName : ''}! Твой персональный код доступа к Step Value: ${cleanCode}\nВведи его при входе в приложение.`;
 
-    function copyTextSafe(text) {
-      try {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(text);
-        } else {
-          const ta = document.createElement('textarea');
-          ta.value = text;
-          document.body.appendChild(ta);
-          ta.select();
-          document.execCommand('copy');
-          ta.remove();
-        }
-      } catch (e) {}
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(inviteText).then(() => {
+          showToast('Приглашение скопировано в буфер обмена!');
+        }).catch(() => {
+          fallbackCopyText(cleanCode);
+        });
+      } else {
+        fallbackCopyText(cleanCode);
+      }
     }
 
-    function copyInviteCode(explicitCode) {
-      const nameEl = document.getElementById('new-st-name');
-      const codeEl = document.getElementById('new-st-code');
-      const rawCode = explicitCode || (codeEl ? codeEl.value.trim().toUpperCase() : '');
-      if (!rawCode) {
-        showToast('Введите персональный код доступа', 'error');
-        return;
+    function fallbackCopyText(text) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        const successful = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (successful) {
+          showToast('Код доступа скопирован в буфер!');
+        } else {
+          showToast(`Код доступа: ${text}`);
+        }
+      } catch (e) {
+        showToast(`Код доступа: ${text}`);
       }
-      const fio = (nameEl && nameEl.value.trim()) ? nameEl.value.trim() : 'Атлет';
-      const inviteMsg = `Привет, ${fio}! Твой персональный код доступа в приложение Step Value: ${rawCode}`;
-      copyTextSafe(inviteMsg);
-      triggerHaptic('success');
-      showToast(`Скопировано в буфер: «${inviteMsg}»`);
     }
 
     async function createNewStudentRecord() {
-      const nameEl = document.getElementById('new-st-name');
-      const userEl = document.getElementById('new-st-username');
-      const priceEl = document.getElementById('new-st-price');
-      const packEl = document.getElementById('new-st-pack');
-      const durEl = document.getElementById('new-st-dur');
-      const codeEl = document.getElementById('new-st-code');
-
-      const customCode = (codeEl ? codeEl.value.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') : '');
-      if (!customCode) {
-        showToast('Укажите код доступа!', 'error');
-        if (codeEl) codeEl.focus();
-        return;
-      }
-
-      const duplicate = (appData.students || []).some(s => (s.access_code || '').toUpperCase() === customCode);
-      if (duplicate) {
-        const errEl = document.getElementById('new-st-code-error');
-        if (errEl) errEl.classList.remove('hidden');
-        showToast(`Код «${customCode}» уже занят!`, 'error');
-        if (codeEl) codeEl.focus();
-        return;
-      }
-
-      const fio = (nameEl ? nameEl.value.trim() : '') || 'Новый Подопечный';
-      const cleanUser = (userEl ? userEl.value.trim() : '').replace(/^@/, '');
-      const rawPrice = priceEl ? Number(priceEl.value) : 0;
-      const subscriptionPrice = isNaN(rawPrice) ? 0 : Math.max(0, rawPrice);
-      
-      const rawPack = packEl ? parseInt(packEl.value, 10) : 0;
-      const pack = isNaN(rawPack) ? 0 : Math.max(0, rawPack);
-      
-      const dur = parseInt(durEl ? durEl.value : 60, 10) || 60;
-
-      const parts = fio.split(' ');
-      const initials = ((parts[0] ? parts[0][0] : 'А') + (parts[1] ? parts[1][0] : 'Т')).toUpperCase();
-
-      const newStudent = {
-        id: 'step-' + Date.now(),
-        supabase_id: null,
-        access_code: customCode,
-        telegram_username: cleanUser,
-        full_name: fio,
-        avatar: initials,
-        status: 'active',
-        freeze_details: { is_frozen: false, from: '', to: '' },
-        price: subscriptionPrice,
-        session_duration: dur,
-        subscription: {
-          id: null,
-          price: subscriptionPrice,
-          total: pack,
-          total_sessions: pack,
-          used: 0,
-          used_sessions: 0,
-          remaining: pack,
-          payment_day: 1,
-          billing_day: 1,
-          robokassa_sum: formatRublesFromNumber(subscriptionPrice),
-          robokassa_url: ''
-        },
-        payment_history: [],
-        medical_notes: '',
-        trainer_private_notes: '',
-        notification_settings: { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
-        workouts: [],
-        anthropometry: [],
-        checkups: [],
-        inbody: [],
-        photo_reports: [],
-        active_bookings: []
-      };
-
-      if (!Array.isArray(appData.students)) {
-        appData.students = [];
-      }
-      appData.students.push(newStudent);
-
-      // Сохраняем локально и в фоне отправляем в Supabase
-      saveAppData();
-      copyInviteCode(customCode);
-      closeModal();
-      renderApp();
-      showToast(`Подопечный ${fio} создан: ${pack} зан., ${subscriptionPrice} ₽`);
-
       try {
-        await persistStudentToSupabase(newStudent);
+        const nameEl = document.getElementById('new-st-name');
+        const userEl = document.getElementById('new-st-username');
+        const priceEl = document.getElementById('new-st-price');
+        const packEl = document.getElementById('new-st-pack');
+        const durEl = document.getElementById('new-st-dur');
+        const codeEl = document.getElementById('new-st-code');
+
+        const customCode = (codeEl ? codeEl.value.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') : '');
+        if (!customCode) {
+          showToast('Укажите код доступа!', 'error');
+          if (codeEl) codeEl.focus();
+          return;
+        }
+
+        const duplicate = (appData.students || []).some(s => (s.access_code || '').toUpperCase() === customCode);
+        if (duplicate) {
+          const errEl = document.getElementById('new-st-code-error');
+          if (errEl) errEl.classList.remove('hidden');
+          showToast(`Код «${customCode}» уже занят!`, 'error');
+          if (codeEl) codeEl.focus();
+          return;
+        }
+
+        const fio = (nameEl ? nameEl.value.trim() : '') || 'Новый Подопечный';
+        const cleanUser = (userEl ? userEl.value.trim() : '').replace(/^@/, '');
+        
+        const rawPrice = priceEl ? parseFloat(priceEl.value) : 0;
+        const price = isNaN(rawPrice) ? 0 : Math.max(0, rawPrice);
+        
+        const rawPack = packEl ? parseInt(packEl.value, 10) : 0;
+        const pack = isNaN(rawPack) ? 0 : Math.max(0, rawPack);
+        
+        const dur = parseInt(durEl ? durEl.value : 120, 10) || 120;
+
+        const parts = fio.split(' ');
+        const initials = ((parts[0] ? parts[0][0] : 'А') + (parts[1] ? parts[1][0] : 'Т')).toUpperCase();
+
+        const newStudent = {
+          id: 'step-' + Date.now(),
+          supabase_id: null,
+          access_code: customCode,
+          telegram_username: cleanUser,
+          full_name: fio,
+          avatar: initials,
+          status: 'active',
+          freeze_details: { is_frozen: false, from: '', to: '' },
+          price: price,
+          session_duration: dur,
+          subscription: {
+            id: null,
+            price: price,
+            total: pack,
+            total_sessions: pack,
+            used: 0,
+            used_sessions: 0,
+            remaining: pack,
+            payment_day: 1,
+            billing_day: 1,
+            robokassa_sum: formatRublesFromNumber(price),
+            robokassa_url: ''
+          },
+          payment_history: [],
+          medical_notes: '',
+          trainer_private_notes: '',
+          notification_settings: { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+          workouts: [],
+          anthropometry: [],
+          checkups: [],
+          inbody: [],
+          photo_reports: [],
+          active_bookings: []
+        };
+
+        if (!Array.isArray(appData.students)) {
+          appData.students = [];
+        }
+        appData.students.push(newStudent);
+        if (typeof appState !== 'undefined' && appState) {
+          appState.students = appData.students;
+        }
+
+        // 1. Копируем инвайт-код в буфер
+        copyInviteCode(customCode, fio);
+
+        // 2. Закрываем модалку и обновляем интерфейс мгновенно
+    saveAppData();
+    closeModal();
+    renderApp();
+    showToast(`Подопечный ${fio} создан: ${pack} зан., ${price} ₽`);
+
+        // 3. Синхронизируем с Supabase с ожиданием
+        if (typeof persistStudentToSupabase === 'function') {
+          await persistStudentToSupabase(newStudent);
+        } else if (typeof syncStudentToCloud === 'function') {
+          await syncStudentToCloud(newStudent);
+        }
       } catch (err) {
-        console.warn('Ошибка отправки в Supabase:', err);
+        console.error('Ошибка в createNewStudentRecord:', err);
+        showToast('Ошибка при создании подопечного: ' + (err.message || 'неизвестная ошибка'), 'error');
       }
     }
 
@@ -5181,9 +5279,10 @@ function renderOnboardingScreen() {
     }
 
 
-    function deleteStudent(studentId) {
+    function confirmDeleteStudent(studentId) {
       triggerHaptic('warning');
-      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
+      const strId = String(studentId);
+      const st = getStudentById(strId) || (appData.students || []).find(s => String(s.id) === strId || s.access_code === strId);
       const stName = st ? st.full_name : 'Подопечный';
       openModal(`
         <div class="space-y-4">
@@ -5199,24 +5298,36 @@ function renderOnboardingScreen() {
           </p>
           <div class="flex gap-2 pt-1">
             <button onclick="closeModal()" class="flex-1 py-2.5 rounded-xl bg-[#1F242C] border border-[#30363D] text-xs font-semibold text-white">Отмена</button>
-            <button onclick="performDeleteStudent('${studentId}')" class="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-extrabold">Удалить</button>
+            <button onclick="executeDeleteStudent('${strId}')" class="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-extrabold">Удалить</button>
           </div>
         </div>
       `);
+      if (window.lucide) window.lucide.createIcons();
     }
 
-    async function performDeleteStudent(studentId) {
-      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
-      const stName = st ? st.full_name : 'Подопечный';
-      const targetDbId = st ? (st.supabase_id || st.id) : studentId;
+    async function executeDeleteStudent(studentId) {
+      const strId = String(studentId);
+      const st = getStudentById(strId) || (appData.students || []).find(s => String(s.id) === strId || s.access_code === strId);
+      const targetDbId = st ? (st.supabase_id || st.id) : strId;
       const targetCode = st ? (st.access_code || '').trim().toUpperCase() : '';
-      const safeNumericId = toValidNumericIdOrNull(targetDbId) || studentId;
+      const safeNumericId = toValidNumericIdOrNull(targetDbId);
+
+      // 1. Мгновенно удаляем объект из памяти appData.students
+      appData.students = (appData.students || []).filter(s =>
+        String(s.id) !== strId &&
+        (!st || String(s.id) !== String(st.id)) &&
+        String(s.id) !== String(targetDbId) &&
+        (!targetCode || String(s.access_code).toUpperCase() !== targetCode)
+      );
+      if (typeof appState !== 'undefined' && appState) {
+        appState.students = appData.students;
+      }
 
       if (appData.schedule_slots) {
         Object.keys(appData.schedule_slots).forEach(dateKey => {
           (appData.schedule_slots[dateKey] || []).forEach(slot => {
             if (
-              String(slot.booked_by) === String(studentId) ||
+              String(slot.booked_by) === strId ||
               (st && String(slot.booked_by) === String(st.id)) ||
               String(slot.booked_by) === String(targetDbId)
             ) {
@@ -5229,56 +5340,68 @@ function renderOnboardingScreen() {
         });
       }
 
-      if (typeof supabase !== 'undefined' && supabase) {
+      if (String(appData.current_student_id) === strId || String(appData.current_student_id) === String(targetDbId)) {
+        appData.current_student_id = appData.students[0] ? appData.students[0].id : null;
+      }
+
+      // 2. Закрываем модалку, сбрасываем выбранный экран, вызываем renderApp(), показываем тост
+      closeModal();
+      uiState.selectedStudentId = null;
+      uiState.selectedTrainerStudentId = null;
+      uiState.trainerStudentSubscreen = null;
+      renderApp();
+      triggerHaptic('warning');
+      showToast('Подопечный удалён');
+
+      // 3. Отправляем запрос в Supabase на удаление строки из student_reports по student_id и student_code
+      if (supabaseClient) {
         try {
-          await Promise.allSettled([
-            supabase.from('workouts').delete().eq('student_id', studentId),
-            supabase.from('bookings').delete().eq('student_id', studentId),
-            supabase.from('measurements').delete().eq('student_id', studentId),
-            supabase.from('checkins').delete().eq('student_id', studentId),
-            supabase.from('subscriptions').delete().eq('student_id', safeNumericId),
-            supabase.from('student_reports').delete().eq('student_id', safeNumericId),
-            targetCode ? supabase.from('student_reports').delete().eq('student_code', targetCode) : Promise.resolve()
-          ]);
-
-          await Promise.allSettled([
-            supabase.from('students').delete().eq('id', studentId),
-            supabase.from('users').delete().eq('id', safeNumericId)
-          ]);
-
+          const deletePromises = [];
+          if (safeNumericId) {
+            deletePromises.push(
+              supabaseClient
+                .from('student_reports')
+                .delete()
+                .eq('student_id', safeNumericId)
+            );
+            deletePromises.push(
+              supabaseClient
+                .from('subscriptions')
+                .delete()
+                .eq('student_id', safeNumericId)
+            );
+            deletePromises.push(
+              supabaseClient
+                .from('bookings')
+                .delete()
+                .eq('student_id', safeNumericId)
+            );
+            deletePromises.push(
+              supabaseClient
+                .from('users')
+                .delete()
+                .eq('id', safeNumericId)
+            );
+          }
+          if (targetCode) {
+            deletePromises.push(
+              supabaseClient
+                .from('student_reports')
+                .delete()
+                .eq('student_code', targetCode)
+            );
+          }
+          await Promise.allSettled(deletePromises);
           await persistScheduleSlotsToSupabase();
         } catch (err) {
           console.warn('Ошибка удаления подопечного из Supabase:', err);
         }
       }
-
-      appData.students = (appData.students || []).filter(s =>
-        String(s.id) !== String(studentId) &&
-        (!st || String(s.id) !== String(st.id)) &&
-        String(s.id) !== String(targetDbId) &&
-        (!targetCode || String(s.access_code).toUpperCase() !== targetCode)
-      );
-      if (typeof appState !== 'undefined' && appState) {
-        appState.students = appData.students;
-      }
-
-      if (String(appData.current_student_id) === String(studentId) || String(appData.current_student_id) === String(targetDbId)) {
-        appData.current_student_id = appData.students[0] ? appData.students[0].id : null;
-      }
-
-      uiState.selectedStudentId = null;
-      uiState.selectedTrainerStudentId = null;
-      uiState.trainerStudentSubscreen = null;
-
-      saveAppData();
-      closeModal();
-      triggerHaptic('warning');
-      showToast(`Подопечный «${stName}» успешно удалён!`);
-      renderApp();
     }
 
-    const confirmDeleteStudentPrompt = deleteStudent;
-    const executeDeleteStudent = deleteStudent;
+    const deleteStudent = confirmDeleteStudent;
+    const confirmDeleteStudentPrompt = confirmDeleteStudent;
+    const performDeleteStudent = executeDeleteStudent;
 
     async function saveTrainerManagementFinanceAndNotes(studentId) {
       const st = getStudentById(studentId) || appData.students.find(s => String(s.id) === String(studentId) || s.access_code === studentId);
@@ -5299,8 +5422,8 @@ function renderOnboardingScreen() {
     function getFilteredSortedStudents() {
       const q = (uiState.studentSearchQuery || '').trim().toLowerCase();
       return [...(appData.students || [])]
-        .filter(s => s.full_name.toLowerCase().includes(q) || s.access_code.toLowerCase().includes(q))
-        .sort((a, b) => a.full_name.localeCompare(b.full_name, 'ru'));
+        .filter(s => (s.full_name || '').toLowerCase().includes(q) || (s.access_code || '').toLowerCase().includes(q))
+        .sort((a, b) => (a.full_name || '').localeCompare((b.full_name || ''), 'ru'));
     }
 
     function buildTrainerStudentsRegistryListMarkup() {
@@ -5843,7 +5966,7 @@ function renderOnboardingScreen() {
             </div>
 
             <div class="pt-1">
-              <button type="button" onclick="deleteStudent('${st.id}')" class="w-full py-3 rounded-xl bg-red-950/30 hover:bg-red-900/50 active:scale-95 border border-red-500/40 hover:border-red-500 text-red-400 hover:text-red-300 font-bold text-xs uppercase tracking-wider transition flex items-center justify-center gap-2">
+              <button type="button" onclick="confirmDeleteStudent('${st.id}')" class="w-full py-3 rounded-xl bg-red-950/30 hover:bg-red-900/50 active:scale-95 border border-red-500/40 hover:border-red-500 text-red-400 hover:text-red-300 font-bold text-xs uppercase tracking-wider transition flex items-center justify-center gap-2">
                 <i data-lucide="trash-2" class="w-4 h-4"></i>
                 <span>Удалить ученика</span>
               </button>
@@ -6060,24 +6183,21 @@ function renderOnboardingScreen() {
     window.addEventListener('DOMContentLoaded', async () => {
       initTelegramSDK();
       initTapToDismissKeyboard();
-      loadAppData();
-
-      await restoreSessionFromTelegram();
-      renderApp();
-
-      try {
-        await syncAllStudentsFromSupabase();
-        if (!appData.current_role) {
-          const restoredAfterSync = await restoreSessionFromTelegram();
-          if (restoredAfterSync) renderApp();
-        } else if (appData.current_role === 'student') {
-          const activeStudent = getCurrentStudent();
-          await getOrCreateSupabaseUser('student', { autoEnter: true, student: activeStudent });
-          renderApp();
-        }
-      } catch (initSyncErr) {
-        console.warn('Фоновая синхронизация при старте:', initSyncErr);
+      if (!appData) {
+        appData = buildInitialSeedData();
+        appState = appData;
       }
+
+      // 1. Мгновенно восстанавливаем роль и профиль из локального хранилища (0 мс)
+      await restoreSessionFromTelegram();
+      renderApp(); // Мгновенный первый кадр без задержек!
+
+      // 2. В фоне параллельно загружаем свежие данные из облака Supabase
+      loadAppData().then(() => {
+        renderApp();
+      }).catch(err => {
+        console.warn('Фоновая загрузка при старте:', err);
+      });
     });
   </script>
 </body>
