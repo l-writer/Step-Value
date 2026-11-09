@@ -1543,8 +1543,8 @@ const TELEGRAM_STORAGE_CONFIG = {
             const srcW = video.videoWidth || 1280;
             const srcH = video.videoHeight || 720;
             const isPortrait = srcH > srcW;
-            const maxLong = 1280;
-            const maxShort = 720;
+            const maxLong = 960;
+            const maxShort = 540;
             const curLong = isPortrait ? srcH : srcW;
             const curShort = isPortrait ? srcW : srcH;
             const scale = Math.min(1, maxLong / curLong, maxShort / curShort);
@@ -1583,7 +1583,7 @@ const TELEGRAM_STORAGE_CONFIG = {
             }
 
             const recorderOptions = {
-              videoBitsPerSecond: 1800000
+              videoBitsPerSecond: 950000
             };
             if (selectedMime) {
               recorderOptions.mimeType = selectedMime;
@@ -1633,6 +1633,7 @@ const TELEGRAM_STORAGE_CONFIG = {
 
             recorder.start(250);
             await video.play();
+            video.playbackRate = 2.0;
             renderFrame();
           } catch (err) {
             cleanup();
