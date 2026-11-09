@@ -419,7 +419,6 @@
           }
         }
 
-        showToast('✓ Данные записаны в облако Supabase!', 'success');
         return true;
       } catch (err) {
         console.error('Ошибка сохранения данных подопечного в Supabase:', err);
@@ -4976,7 +4975,6 @@ function copyInviteCode(code, name = '') {
 
       if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
         navigator.clipboard.writeText(inviteText).then(() => {
-          showToast('Приглашение скопировано в буфер обмена!');
         }).catch(() => {
           fallbackCopyText(cleanCode);
         });
@@ -5108,7 +5106,7 @@ function copyInviteCode(code, name = '') {
         // 3. Закрываем модалку и перерисовываем список
         closeModal();
         renderApp();
-        showToast(`Подопечный ${fio} создан: ${pack} зан., ${price} ₽`);
+        showToast(`Подопечный ${fio} создан. Приглашение скопировано.`);
       } catch (err) {
         console.error('Ошибка в createNewStudentRecord:', err);
         showToast('Ошибка при создании подопечного: ' + (err.message || 'неизвестная ошибка'), 'error');
