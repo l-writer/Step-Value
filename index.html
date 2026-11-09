@@ -325,7 +325,11 @@
               telegram_msg_id: 0
             })
             .eq('id', existingReport.id);
-          if (updErr) console.warn('Предупреждение update student_reports:', updErr);
+          if (updErr) {
+            console.error('Ошибка обновления в Supabase:', updErr);
+            showToast('Ошибка базы: ' + (updErr.message || 'не удалось обновить'), 'error');
+            return false;
+          }
         } else {
           const { error: insErr } = await supabaseClient
             .from('student_reports')
@@ -337,7 +341,11 @@
               telegram_msg_id: 0,
               created_at: new Date().toISOString()
             }]);
-          if (insErr) console.warn('Предупреждение insert student_reports:', insErr);
+          if (insErr) {
+            console.error('Ошибка создания в Supabase:', insErr);
+            showToast('Ошибка базы: ' + (insErr.message || 'не удалось записать'), 'error');
+            return false;
+          }
         }
 
         return true;
@@ -6192,11 +6200,11 @@ function copyInviteCode(code, name = '') {
       await restoreSessionFromTelegram();
       renderApp(); // Мгновенный первый кадр без задержек!
 
-      // 2. В фоне параллельно загружаем свежие данные из облака Supabase
-      loadAppData().then(() => {
+      // 2. Загружаем всех подопечных и расписание напрямую из облака Supabase
+      syncAllStudentsFromSupabase().then(() => {
         renderApp();
       }).catch(err => {
-        console.warn('Фоновая загрузка при старте:', err);
+        console.warn('Ошибка загрузки из Supabase при старте:', err);
       });
     });
   </script>
