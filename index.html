@@ -3052,7 +3052,9 @@ function renderOnboardingScreen() {
       renderApp();
     }
 
-    async function handleExerciseVideoUpload(event, idx) {
+    let exerciseUploadChain = Promise.resolve();
+
+async function handleExerciseVideoUpload(event, idx) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
 
@@ -3061,49 +3063,79 @@ function renderOnboardingScreen() {
   const d = uiState.draftWorkout;
   if (!d || !d.exercises || !d.exercises[idx]) return;
 
-  // 1. Фиксируем флаг загрузки прямо в данных упражнения
-  const isAnotherUploading = d.exercises.some((e, i) => i !== idx && e && e.is_uploading);
+  // Сразу помечаем элемент как стоящий в очереди
   d.exercises[idx].is_uploading = true;
-  d.exercises[idx].upload_status = isAnotherUploading ? 'В очереди...' : (file.size > 45 * 1024 * 1024 ? 'Сжатие 720p...' : 'Загрузка...');
+  d.exercises[idx].upload_status = 'В очереди...';
   renderApp();
 
-  try {
-    const processedFile = await compressVideoFile(file, (txt) => {
+  // Добавляем обработку в строгую очередь: второе видео ждёт окончания первого
+  exerciseUploadChain = exerciseUploadChain.then(async () => {
+    try {
+      if (!d.exercises[idx]) return;
+
+      d.exercises[idx].upload_status = file.size > 45 * 1024 * 1024 ? 'Сжатие 720p...' : 'Загрузка...';
+      renderApp();
+
+      const processedFile = await compressVideoFile(file, (txt) => {
+        if (d.exercises[idx]) {
+          d.exercises[idx].upload_status = txt;
+          const lbl = document.getElementById(`ex-video-status-${idx}`);
+          if (lbl) lbl.innerText = txt;
+        }
+      });
+
       if (d.exercises[idx]) {
-        d.exercises[idx].upload_status = txt;
+        d.exercises[idx].upload_status = 'Отправка...';
         const lbl = document.getElementById(`ex-video-status-${idx}`);
-        if (lbl) lbl.innerText = txt;
+        if (lbl) lbl.innerText = 'Отправка...';
       }
-    });
 
-    if (d.exercises[idx]) {
-      d.exercises[idx].upload_status = 'Загрузка...';
-      const lbl = document.getElementById(`ex-video-status-${idx}`);
-      if (lbl) lbl.innerText = 'Загрузка...';
-    }
+      const student = (typeof getCurrentStudent === 'function') ? getCurrentStudent() : null;
+      const exName = d.exercises[idx].name || 'Упражнение';
+      const caption = `🏋️ Подход: ${exName}\nУченик: ${student ? (student.full_name || student.name || '—') : '—'}`;
 
-    const student = (typeof getCurrentStudent === 'function') ? getCurrentStudent() : null;
-    const exName = d.exercises[idx].name || 'Упражнение';
-    const caption = `🏋️ Подход: ${exName}\nУченик: ${student ? (student.full_name || student.name || '—') : '—'}`;
+      // Отправка с повторной попыткой при разрыве мобильного интернета
+      let uploadRes = null;
+      let lastErr = null;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          uploadRes = await uploadVideoMediaToTelegram(processedFile, caption);
+          if (uploadRes && uploadRes.video_url) break;
+        } catch (e) {
+          lastErr = e;
+          if (attempt === 1) {
+            await new Promise(r => setTimeout(r, 1500));
+          }
+        }
+      }
 
-    const uploadRes = await uploadVideoMediaToTelegram(processedFile, caption);
+      if (!uploadRes || !uploadRes.video_url) {
+        throw lastErr || new Error('Не удалось загрузить видео');
+      }
 
-    if (uploadRes && uploadRes.video_url) {
       d.exercises[idx].video_url = uploadRes.video_url;
       d.exercises[idx].video_file_id = uploadRes.file_id;
-      if (typeof showToast === 'function') showToast('Видео подхода загружено в облако');
+      if (typeof showToast === 'function') showToast('Видео подхода сохранено');
+
+    } catch (err) {
+      console.error('Ошибка загрузки видео:', err);
+      const msg = err && err.message ? err.message : 'Ошибка сети при загрузке';
+      if (typeof showToast === 'function') showToast(msg, 'error');
+    } finally {
+      if (d.exercises[idx]) {
+        delete d.exercises[idx].is_uploading;
+        delete d.exercises[idx].upload_status;
+      }
+      renderApp();
     }
-  } catch (err) {
-    console.error('Ошибка загрузки видео:', err);
-    if (typeof showToast === 'function') showToast(err.message || 'Ошибка при загрузке видео', 'error');
-  } finally {
-    // 2. Снимаем статус только для этого конкретного упражнения
+  }).catch((err) => {
+    console.error('Критический сбой в очереди видео:', err);
     if (d.exercises[idx]) {
       delete d.exercises[idx].is_uploading;
       delete d.exercises[idx].upload_status;
     }
     renderApp();
-  }
+  });
 }
 
     function removeExerciseVideo(idx) {
