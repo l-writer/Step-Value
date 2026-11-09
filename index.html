@@ -1510,7 +1510,7 @@ const TELEGRAM_STORAGE_CONFIG = {
       }
 
       if (typeof showToast === 'function') {
-        showToast('Видео > 45 МБ: перекодируем в 720p (30 fps)...', 'info');
+        showToast('Видео > 45 МБ: перекодируем...', 'info');
       }
       if (typeof onStatusText === 'function') {
         onStatusText('Сжатие 720p...');
@@ -3042,45 +3042,57 @@ function renderOnboardingScreen() {
     }
 
     async function handleExerciseVideoUpload(event, idx) {
-      const file = event.target.files && event.target.files[0];
-      if (!file) return;
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
 
-      syncDraftWorkoutFromDOM();
+  syncDraftWorkoutFromDOM();
 
-      const d = uiState.draftWorkout;
-      const statusLabel = document.getElementById(`ex-video-status-${idx}`);
-      if (statusLabel) {
-        statusLabel.innerText = file.size > 45 * 1024 * 1024 ? 'Сжатие 720p...' : 'Загрузка...';
-        statusLabel.className = 'text-[11px] font-bold text-yellow-400';
+  const d = uiState.draftWorkout;
+  if (!d || !d.exercises || !d.exercises[idx]) return;
+
+  // 1. Фиксируем флаг загрузки прямо в данных упражнения
+  d.exercises[idx].is_uploading = true;
+  d.exercises[idx].upload_status = file.size > 45 * 1024 * 1024 ? 'Сжатие 720p...' : 'Загрузка...';
+  renderApp();
+
+  try {
+    const processedFile = await compressVideoFile(file, (txt) => {
+      if (d.exercises[idx]) {
+        d.exercises[idx].upload_status = txt;
+        const lbl = document.getElementById(`ex-video-status-${idx}`);
+        if (lbl) lbl.innerText = txt;
       }
+    });
 
-      try {
-        const processedFile = await compressVideoFile(file, (txt) => {
-          if (statusLabel) statusLabel.innerText = txt;
-        });
-        if (statusLabel) {
-          statusLabel.innerText = 'Загрузка...';
-        }
-        const student = (typeof getCurrentStudent === 'function') ? getCurrentStudent() : null;
-        const exName = d && d.exercises && d.exercises[idx] ? (d.exercises[idx].name || 'Упражнение') : 'Упражнение';
-        const caption = `🏋️ Подход: ${exName}\nУченик: ${student ? (student.full_name || student.name) : 'Подопечный'}`;
-
-        const uploadRes = await uploadVideoMediaToTelegram(processedFile, caption);
-
-        if (uploadRes && uploadRes.video_url) {
-          if (d && d.exercises && d.exercises[idx]) {
-            d.exercises[idx].video_url = uploadRes.video_url;
-            d.exercises[idx].video_file_id = uploadRes.file_id;
-          }
-          if (typeof showToast === 'function') showToast('Видео подхода загружено в облако!');
-        }
-      } catch (err) {
-        console.error('Ошибка загрузки видео:', err);
-        if (typeof showToast === 'function') showToast(err.message || 'Ошибка при загрузке видео', 'error');
-      } finally {
-        renderApp();
-      }
+    if (d.exercises[idx]) {
+      d.exercises[idx].upload_status = 'Загрузка...';
+      const lbl = document.getElementById(`ex-video-status-${idx}`);
+      if (lbl) lbl.innerText = 'Загрузка...';
     }
+
+    const student = (typeof getCurrentStudent === 'function') ? getCurrentStudent() : null;
+    const exName = d.exercises[idx].name || 'Упражнение';
+    const caption = `🏋️ Подход: ${exName}\nУченик: ${student ? (student.full_name || student.name || '—') : '—'}`;
+
+    const uploadRes = await uploadVideoMediaToTelegram(processedFile, caption);
+
+    if (uploadRes && uploadRes.video_url) {
+      d.exercises[idx].video_url = uploadRes.video_url;
+      d.exercises[idx].video_file_id = uploadRes.file_id;
+      if (typeof showToast === 'function') showToast('Видео подхода загружено в облако');
+    }
+  } catch (err) {
+    console.error('Ошибка загрузки видео:', err);
+    if (typeof showToast === 'function') showToast(err.message || 'Ошибка при загрузке видео', 'error');
+  } finally {
+    // 2. Снимаем статус только для этого конкретного упражнения
+    if (d.exercises[idx]) {
+      delete d.exercises[idx].is_uploading;
+      delete d.exercises[idx].upload_status;
+    }
+    renderApp();
+  }
+}
 
     function removeExerciseVideo(idx) {
       syncDraftWorkoutFromDOM();
@@ -3221,13 +3233,13 @@ function renderOnboardingScreen() {
                       <input id="ex-weight-${idx}" type="number" step="0.5" min="0" value="${ex.weight !== 0 && ex.weight !== '0' ? ex.weight : ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" class="w-full bg-[#090C10] border border-[#30363D] rounded-lg px-2.5 py-1.5 text-xs font-extrabold text-[#00E676] text-center outline-none focus:border-[#00E676]" />
                     </div>
                     <div class="flex items-center gap-1 w-full">
-            <label class="cursor-pointer flex-1 h-[38px] px-1.5 rounded-xl border ${ex.video_url ? 'border-[#00E676]/40 bg-[#00E676]/10' : 'border-[#30363D] bg-[#161B22]'} hover:border-[#00E676]/60 flex items-center justify-center gap-1 transition-colors shrink min-w-0">
-              <i data-lucide="${ex.video_url ? 'check' : 'video'}" class="w-3.5 h-3.5 ${ex.video_url ? 'text-[#00E676]' : 'text-[#8B949E]'} shrink-0"></i>
-              <span id="ex-video-status-${idx}" class="text-[10px] font-bold whitespace-nowrap ${ex.video_url ? 'text-[#00E676]' : 'text-gray-300'}">
-                ${ex.video_url ? '✓ Видео' : '+ Видео'}
-              </span>
-              <input type="file" accept="video/*" class="hidden" onchange="handleExerciseVideoUpload(event, ${idx})" />
-            </label>
+            <label class="cursor-pointer flex-1 h-[38px] px-1.5 rounded-xl border ${ex.is_uploading ? 'border-yellow-500/50 bg-yellow-500/10 text-yellow-400' : (ex.video_url ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400' : 'border-white/10 bg-white/5 text-neutral-300')} flex items-center justify-center gap-1.5 transition-all">
+    <i data-lucide="${ex.is_uploading ? 'loader-2' : (ex.video_url ? 'check' : 'video')}" class="w-3.5 h-3.5 ${ex.is_uploading ? 'animate-spin text-yellow-400' : ''}"></i>
+    <span id="ex-video-status-${idx}" class="text-[10px] font-bold whitespace-nowrap">
+      ${ex.is_uploading ? (ex.upload_status || 'Загрузка...') : (ex.video_url ? 'Видео' : '+ Видео')}
+    </span>
+    <input type="file" accept="video/*" class="hidden" ${ex.is_uploading ? 'disabled' : ''} onchange="handleExerciseVideoUpload(event, ${idx})">
+  </label>
             ${ex.video_url ? `
               <button type="button" onclick="removeExerciseVideo(${idx})" class="h-[38px] w-7 flex items-center justify-center shrink-0 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 hover:text-red-300" title="Удалить видео">
                 <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
