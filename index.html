@@ -646,18 +646,6 @@
         });
 
         const combinedCandidates = [...users];
-        profileMetaRecords.forEach(item => {
-          const parts = String(item.meta.full_name || 'Атлет').trim().split(/\s+/);
-          combinedCandidates.push({
-            id: item.student_id || (item.code ? `meta-${item.code}` : `meta-${item.report.id || Date.now()}`),
-            first_name: parts[0] || 'Атлет',
-            last_name: parts.slice(1).join(' ') || '',
-            username: buildEncodedUsername(item.code, item.meta.telegram_username || ''),
-            access_code: item.code,
-            telegram_username: item.meta.telegram_username || '',
-            role: 'student'
-          });
-        });
 
         // Единый источник истины — строго данные из Supabase (users + student_reports)
 
