@@ -5429,7 +5429,6 @@ function copyInviteCode(code, name = '') {
       uiState.trainerStudentSubscreen = null;
       renderApp();
       triggerHaptic('warning');
-      showToast('Подопечный удалён');
 
       // 3. Отправляем запрос в Supabase на удаление строки из student_reports по student_id и student_code
       ensureSupabaseClient();
@@ -5477,7 +5476,7 @@ if (targetCode) {
   }
 
   await persistScheduleSlotsToSupabase();
-  showToast('Подопечный полностью удалён из базы Supabase');
+  showToast('Подопечный удалён');
     } catch (err) {
       console.error('Ошибка удаления подопечного из Supabase:', err);
     }
