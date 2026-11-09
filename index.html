@@ -19,8 +19,16 @@
     const SUPABASE_URL = 'https://qmijcqlgdyyvuumwannu.supabase.co';
     const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFtaWpjcWxnZHl5dnV1bXdhbm51Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM3ODkxOTIsImV4cCI6MjEwOTM2NTE5Mn0.R412gCNyzGOayLajg039ZM4w5MBqFY59zaEjQm3YgIQ';
 
-    const supabaseClient = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
-    const supabase = supabaseClient;
+    let supabaseClient = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+    let supabase = supabaseClient;
+
+    function ensureSupabaseClient() {
+      if (!supabaseClient && window.supabase && typeof window.supabase.createClient === 'function') {
+        supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+        supabase = supabaseClient;
+      }
+      return supabaseClient;
+    }
 
     let currentUser = null;
     let currentSubscription = null;
@@ -114,7 +122,12 @@
     }
 
     async function syncStudentToCloud(st) {
-      if (!supabaseClient || !st) return false;
+      ensureSupabaseClient();
+      if (!supabaseClient) {
+        showToast('Ошибка: SDK Supabase не загружен из сети', 'error');
+        return false;
+      }
+      if (!st) return false;
       try {
         if (!st.subscription) st.subscription = {};
         const fullName = String(st.full_name || st.name || 'Атлет').trim();
@@ -348,6 +361,7 @@
           }
         }
 
+        showToast('✓ Данные записаны в облако Supabase!', 'success');
         return true;
       } catch (err) {
         console.error('Ошибка сохранения данных подопечного в Supabase:', err);
@@ -485,7 +499,11 @@
     }
 
     async function syncAllStudentsFromSupabase() {
-      if (!supabaseClient) return;
+      ensureSupabaseClient();
+      if (!supabaseClient) {
+        console.warn('syncAllStudentsFromSupabase: клиент Supabase не готов');
+        return;
+      }
       try {
         const [usersRes, subsRes, bksRes, reportsRes] = await Promise.allSettled([
           supabaseClient.from('users').select('*').eq('role', 'student'),
