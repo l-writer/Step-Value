@@ -5358,38 +5358,38 @@ function copyInviteCode(code, name = '') {
     }
 
     async function adjustStudentRemainingBalance(studentId, delta) {
-  const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId));
-  if (!st || !st.subscription) return;
+    const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId));
+    if (!st || !st.subscription) return;
 
-  const total = Math.max(0, Number(st.subscription.total_sessions ?? st.subscription.total ?? 0));
+    const total = Math.max(0, Number(st.subscription.total_sessions ?? st.subscription.total ?? 0));
+    
+    // Берём текущий реальный остаток без вычитания used_sessions
+    let currentRem = Number(st.subscription.remaining);
+    if (isNaN(currentRem)) {
+      const prevUsed = Number(st.subscription.used_sessions ?? st.subscription.used ?? 0);
+      currentRem = Math.max(0, total - prevUsed);
+    }
 
-  // Текущий остаток берем строго из объекта
-  let currentRemaining = Number(st.subscription.remaining);
-  if (isNaN(currentRemaining)) {
-    const currentUsed = Number(st.subscription.used_sessions ?? st.subscription.used ?? 0);
-    currentRemaining = Math.max(0, total - currentUsed);
+    // Применяем дельту (+1 или -1)
+    let newRemaining = currentRem + Number(delta || 0);
+    if (newRemaining < 0) newRemaining = 0;
+    if (total > 0 && newRemaining > total) newRemaining = total;
+
+    // Использованные строго равны остатку до общего пакета
+    const newUsed = Math.max(0, total - newRemaining);
+
+    // Записываем во все дублирующие поля объекта
+    st.subscription.total = total;
+    st.subscription.total_sessions = total;
+    st.subscription.remaining = newRemaining;
+    st.subscription.used = newUsed;
+    st.subscription.used_sessions = newUsed;
+
+    await persistStudentToSupabase(st);
+    renderApp();
+    triggerHaptic('light');
+    showToast(`Баланс сохранён: осталось ${newRemaining} из ${total}`);
   }
-
-  // Применяем дельту (+1 или -1)
-  let newRemaining = currentRemaining + delta;
-  if (newRemaining < 0) newRemaining = 0;
-  if (total > 0 && newRemaining > total) newRemaining = total;
-
-  // Использованные строго равны разнице
-  const newUsed = Math.max(0, total - newRemaining);
-
-  // Синхронно обновляем все связанные поля
-  st.subscription.total = total;
-  st.subscription.total_sessions = total;
-  st.subscription.remaining = newRemaining;
-  st.subscription.used = newUsed;
-  st.subscription.used_sessions = newUsed;
-
-  await persistStudentToSupabase(st);
-  renderApp();
-  triggerHaptic('light');
-  showToast(`Баланс сохранён: осталось ${newRemaining} из ${total}`);
-}
 
     async function updateStudentTotalSubscription(studentId, totalVal) {
   const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId));
