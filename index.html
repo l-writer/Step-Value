@@ -1044,11 +1044,10 @@
           }
 
         currentSubscription = updatedSub;
-        if (currentSt) {
+        if (currentSt && currentSt.subscription) {
           currentSt.subscription.used = newUsedSessions;
           currentSt.subscription.used_sessions = newUsedSessions;
           currentSt.subscription.remaining = Math.max(0, totalSessions - newUsedSessions);
-          await persistStudentToSupabase(currentSt);
         }
 
         return {
@@ -2622,23 +2621,26 @@ function renderOnboardingScreen() {
         }
 
         // ==================== НОВОЕ БРОНИРОВАНИЕ (Списание занятия) ====================
-        if (student.subscription && student.subscription.remaining <= 0) {
+        const activeStudent = getCurrentStudent() || student;
+        if (!Array.isArray(activeStudent.active_bookings)) activeStudent.active_bookings = [];
+        
+        const total = Math.max(0, Number(activeStudent.subscription?.total ?? 0));
+        const currentUsed = Math.max(0, Number(activeStudent.subscription?.used ?? 0));
+        const currentRem = Math.max(0, Number(activeStudent.subscription?.remaining !== undefined ? activeStudent.subscription?.remaining : (total - currentUsed)));
+
+        if (currentRem <= 0) {
           showToast('Закончились тренировки в абонементе! Обновите абонемент для записи.', 'error');
           return;
         }
 
-        const activeStudent = getCurrentStudent() || student;
-        if (!Array.isArray(activeStudent.active_bookings)) activeStudent.active_bookings = [];
-
-        // ОПТИМИСТИЧНЫЙ UI: 1. Локально списываем баланс
-        const tempId = 'bk-temp-' + Date.now();
+        // Оптимистичный UI: списываем ровно 1 занятие локально
         const sessionDuration = activeStudent.session_duration || 60;
+        const tempId = 'bk-temp-' + Date.now();
         
-        activeStudent.subscription.used += 1;
-        activeStudent.subscription.used_sessions += 1;
-        activeStudent.subscription.remaining -= 1;
+        activeStudent.subscription.used = currentUsed + 1;
+        activeStudent.subscription.used_sessions = currentUsed + 1;
+        activeStudent.subscription.remaining = Math.max(0, currentRem - 1);
 
-        // 2. Локально занимаем слоты
         const hoursNeeded = Math.ceil(sessionDuration / 60);
         const targetDaySlots = appData.schedule_slots[isoDate] || [];
         const targetStartIndex = targetDaySlots.findIndex(s => s.time === startTime);
@@ -2650,7 +2652,6 @@ function renderOnboardingScreen() {
           }
         }
 
-        // 3. Локально добавляем бронь
         activeStudent.active_bookings.push({
           id: tempId,
           date: isoDate,
@@ -2661,35 +2662,35 @@ function renderOnboardingScreen() {
 
         saveAppData();
         triggerHaptic('success');
-        showToast(`Забронировано на ${startTime}. Синхронизация...`);
-        renderApp(); // Мгновенная отрисовка
+        showToast(`Забронировано на ${startTime}! Остаток: ${activeStudent.subscription.remaining}`);
+        renderApp();
 
-        // 4. Фоновый запрос
-        bookSession(isoDate, startTime).then(async (result) => {
-           if (result && result.success) {
-               // Заменяем временный ID на реальный
-               const idx = activeStudent.active_bookings.findIndex(b => b.id === tempId);
-               if (idx !== -1) {
-                   activeStudent.active_bookings[idx].id = result.booking.id;
-               }
-               // Синхронизируем состояние абонемента (на случай расхождений)
-               const sub = result.sub;
-               activeStudent.subscription.id = sub.id;
-               activeStudent.subscription.total = Number(sub.total_sessions);
-               activeStudent.subscription.used = Number(sub.used_sessions);
-               activeStudent.subscription.remaining = activeStudent.subscription.total - activeStudent.subscription.used;
-               
-               await persistStudentToSupabase(activeStudent);
-               await persistScheduleSlotsToSupabase();
-               saveAppData();
-           } else {
-               // Если ошибка (например, сервер упал), откатываем изменения (здесь можно добавить логику отката)
-               showToast('Ошибка синхронизации бронирования!', 'error');
-           }
-        }).catch(err => {
-            console.error(err);
+        // Фоновый запрос в базу
+        Promise.resolve().then(async () => {
+          const result = await bookSession(isoDate, startTime);
+          if (result && result.success) {
+            const idx = activeStudent.active_bookings.findIndex(b => b.id === tempId);
+            if (idx !== -1) activeStudent.active_bookings[idx].id = result.booking.id;
+            
+            // Фиксируем ID абонемента из базы, не трогая локально вычтенный баланс
+            if (result.sub && result.sub.id) {
+              activeStudent.subscription.id = result.sub.id;
+            }
+            
+            await persistScheduleSlotsToSupabase();
+            saveAppData();
+          } else {
+            // В случае сетевой ошибки возвращаем слот и занятие назад
+            activeStudent.active_bookings = activeStudent.active_bookings.filter(b => b.id !== tempId);
+            releaseBookingEntryFromSchedule(activeStudent, { date: isoDate, time: startTime, duration: sessionDuration });
+            activeStudent.subscription.used = currentUsed;
+            activeStudent.subscription.used_sessions = currentUsed;
+            activeStudent.subscription.remaining = currentRem;
+            saveAppData();
+            renderApp();
+            showToast('Не удалось забронировать. Проверьте интернет.', 'error');
+          }
         });
-
       } finally {
         isBookingInProgress = false;
       }
