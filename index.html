@@ -4331,15 +4331,20 @@ async function handleExerciseVideoUpload(event, idx) {
       const notesEl = document.getElementById('tr-mgmt-private-notes');
 
       if (packEl) {
-        const rawPack = packEl.value.trim();
-        const newTotal = rawPack === '' ? 0 : Math.max(0, parseInt(rawPack, 10) || 0);
-        const currentUsed = Math.min(newTotal, Math.max(0, Number(st.subscription.used_sessions ?? st.subscription.used) || 0));
-        st.subscription.total = newTotal;
-        st.subscription.total_sessions = newTotal;
-        st.subscription.used = currentUsed;
-        st.subscription.used_sessions = currentUsed;
-        st.subscription.remaining = Math.max(0, newTotal - currentUsed);
-      }
+    const rawPack = packEl.value.trim();
+    const newTotal = rawPack === '' ? 0 : Math.max(0, parseInt(rawPack, 10) || 0);
+    st.subscription.total = newTotal;
+    st.subscription.total_sessions = newTotal;
+
+    // Если remaining уже есть в объекте, держим его в пределах нового пакета
+    let currentRem = Number(st.subscription.remaining ?? (newTotal - Number(st.subscription.used_sessions ?? st.subscription.used ?? 0)));
+    if (isNaN(currentRem)) currentRem = 0;
+    if (newTotal > 0 && currentRem > newTotal) currentRem = newTotal;
+
+    st.subscription.remaining = currentRem;
+    st.subscription.used = Math.max(0, newTotal - currentRem);
+    st.subscription.used_sessions = Math.max(0, newTotal - currentRem);
+  }
       if (dayEl && dayEl.value !== '') {
         const newDay = Math.min(28, Math.max(1, parseInt(dayEl.value, 10) || 1));
         st.subscription.payment_day = newDay;
