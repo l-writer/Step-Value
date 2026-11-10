@@ -5474,35 +5474,40 @@ function copyInviteCode(code, name = '') {
     }
 
     async function executeDeleteStudent(studentId) {
-      const strId = String(studentId);
-      const st = getStudentById(strId) || (appData.students || []).find(s => String(s.id) === strId || s.access_code === strId);
+      const strId = String(studentId || '').trim();
+      const st = getStudentById(strId) || (appData.students || []).find(s => 
+        String(s.id) === strId || 
+        String(s.supabase_id) === strId || 
+        String(s.access_code || '').toUpperCase() === strId.toUpperCase()
+      );
+
       const targetDbId = st ? (st.supabase_id || st.id) : strId;
-      const targetCode = st ? (st.access_code || '').trim().toUpperCase() : '';
+      const targetCode = st ? String(st.access_code || '').trim().toUpperCase() : '';
       const safeNumericId = toValidNumericIdOrNull(targetDbId);
 
-      // 1. Мгновенно удаляем объект из памяти appData.students
-      appData.students = (appData.students || []).filter(s =>
-        String(s.id) !== strId &&
-        (!st || String(s.id) !== String(st.id)) &&
-        String(s.id) !== String(targetDbId) &&
-        (!targetCode || String(s.access_code).toUpperCase() !== targetCode)
-      );
+      // 1. Мгновенно вычищаем из локального массива appData
+      appData.students = (appData.students || []).filter(s => {
+        const sId = String(s.id);
+        const sSubId = String(s.supabase_id || '');
+        const sCode = String(s.access_code || '').toUpperCase();
+        if (sId === strId || sId === String(targetDbId)) return false;
+        if (sSubId && (sSubId === strId || sSubId === String(targetDbId))) return false;
+        if (targetCode && sCode === targetCode) return false;
+        return true;
+      });
+
       if (typeof appState !== 'undefined' && appState) {
         appState.students = appData.students;
       }
 
+      // Освобождаем слоты тренера
       if (appData.schedule_slots) {
         Object.keys(appData.schedule_slots).forEach(dateKey => {
           (appData.schedule_slots[dateKey] || []).forEach(slot => {
-            if (
-              String(slot.booked_by) === strId ||
-              (st && String(slot.booked_by) === String(st.id)) ||
-              String(slot.booked_by) === String(targetDbId)
-            ) {
+            const b = String(slot.booked_by || '');
+            if (b === strId || b === String(targetDbId) || (st && b === String(st.id))) {
               slot.booked_by = null;
-              if (slot.baseline_closed) {
-                slot.is_open = false;
-              }
+              if (slot.baseline_closed) slot.is_open = false;
             }
           });
         });
@@ -5512,7 +5517,6 @@ function copyInviteCode(code, name = '') {
         appData.current_student_id = appData.students[0] ? appData.students[0].id : null;
       }
 
-      // 2. Закрываем модалку, сбрасываем выбранный экран, вызываем renderApp(), показываем тост
       closeModal();
       uiState.selectedStudentId = null;
       uiState.selectedTrainerStudentId = null;
@@ -5520,58 +5524,35 @@ function copyInviteCode(code, name = '') {
       renderApp();
       triggerHaptic('warning');
 
-      // 3. Отправляем запрос в Supabase на удаление строки из student_reports по student_id и student_code
+      // 2. Полное удаление из Supabase
       ensureSupabaseClient();
       if (supabaseClient) {
         try {
           const deletePromises = [];
 
-// Получаем UUID пользователя, если он передан строкой, либо берем из объекта ученика
-const userUuid = (typeof student !== 'undefined' && student?.id && String(student.id).includes('-')) 
-  ? student.id 
-  : null;
+          if (targetCode) {
+            deletePromises.push(supabaseClient.from('student_reports').delete().eq('student_code', targetCode));
+          }
+          if (safeNumericId) {
+            deletePromises.push(supabaseClient.from('student_reports').delete().eq('student_id', safeNumericId));
+            deletePromises.push(supabaseClient.from('bookings').delete().eq('student_id', safeNumericId));
+            deletePromises.push(supabaseClient.from('subscriptions').delete().eq('student_id', safeNumericId));
+            deletePromises.push(supabaseClient.from('users').delete().eq('id', safeNumericId));
+          }
 
-// 1. Удаление из таблицы users:
-// В таблице users код записан в колонку 'username', а числовой ID — в 'telegram_id'
-if (targetCode) {
-  deletePromises.push(supabaseClient.from('users').delete().eq('username', targetCode));
-}
-if (userUuid) {
-  deletePromises.push(supabaseClient.from('users').delete().eq('id', userUuid));
-}
-if (safeNumericId) {
-  deletePromises.push(supabaseClient.from('users').delete().eq('telegram_id', safeNumericId));
-}
+          if (targetCode) {
+            deletePromises.push(supabaseClient.from('users').delete().ilike('username', `${targetCode}%`));
+          }
 
-// 2. Удаление из связанных таблиц:
-if (targetCode) {
-  deletePromises.push(supabaseClient.from('student_reports').delete().eq('student_code', targetCode));
-}
-
-// Таблицы bookings и subscriptions привязаны по UUID student_id
-  if (userUuid) {
-    deletePromises.push(supabaseClient.from('bookings').delete().eq('student_id', userUuid));
-    deletePromises.push(supabaseClient.from('subscriptions').delete().eq('student_id', userUuid));
-  }
-
-  await Promise.allSettled(deletePromises);
-
-  // Вычищаем ученика из памяти приложения
-  if (Array.isArray(appData.students)) {
-    appData.students = appData.students.filter(s => 
-      s.code !== targetCode && 
-      s.username !== targetCode && 
-      s.id !== (typeof userUuid !== 'undefined' ? userUuid : null)
-    );
-  }
-
-  await persistScheduleSlotsToSupabase();
-  showToast('Подопечный удалён');
-    } catch (err) {
-      console.error('Ошибка удаления подопечного из Supabase:', err);
+          await Promise.allSettled(deletePromises);
+          await persistScheduleSlotsToSupabase();
+          showToast('Подопечный навсегда удалён из базы');
+        } catch (err) {
+          console.error('Ошибка удаления подопечного из Supabase:', err);
+          showToast('Ошибка при удалении из базы', 'error');
+        }
+      }
     }
-  }
-}
 
     const deleteStudent = confirmDeleteStudent;
     const confirmDeleteStudentPrompt = confirmDeleteStudent;
