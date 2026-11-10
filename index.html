@@ -4206,22 +4206,40 @@ async function handleExerciseVideoUpload(event, idx) {
     return d >= startOfThisWeek;
   });
 
-  const badgeSubmitted = '<span class="text-[10px] font-bold text-[#00E676] bg-[#00E676]/10 px-2 py-0.5 rounded-full whitespace-nowrap">Сдано</span>';
-  const badgePending = '<span class="text-[10px] font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full whitespace-nowrap">Ожидает</span>';
-  const badgeEmpty = '<span class="h-5"></span>';
+  // 2. InBody и Фото: окно сдачи за 3 дня до конца месяца
+  const lastDayOfMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+  const isInMonthWindow = todayDate >= (lastDayOfMonth - 2);
+
+  const inbodySubmittedThisMonth = Array.isArray(student.inbody) && student.inbody.some(b => {
+    if (!b.date) return false;
+    const parts = b.date.split('.');
+    const d = parts.length === 3 ? new Date(parts[2], parts[1] - 1, parts[0]) : new Date(b.date);
+    return d.getFullYear() === currentYear && d.getMonth() === currentMonth;
+  });
+
+  const photosSubmittedThisMonth = Array.isArray(student.photo_reports) && student.photo_reports.some(p => {
+    const hasAnyPhoto = Boolean(p.front_url || p.side_url || p.back_url || p.front_custom || p.side_custom || p.back_custom);
+    if (!hasAnyPhoto) return false;
+    if (!p.date && !p.month) return true;
+    const d = p.date ? new Date(p.date) : new Date();
+    return d.getFullYear() === currentYear && d.getMonth() === currentMonth;
+  });
+
+  // 3. Плашки
+  const badgeSubmitted = '<span class="absolute top-2.5 right-2.5 text-[9px] font-bold text-[#00E676] bg-[#00E676]/15 border border-[#00E676]/30 px-2 py-0.5 rounded-full">Сдано</span>';
+  const badgePending = '<span class="absolute top-2.5 right-2.5 text-[9px] font-bold text-amber-400 bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 rounded-full">Ожидает</span>';
 
   const checkupBadge = checkupSubmittedThisWeek
     ? badgeSubmitted
-    : (isSunday ? badgePending : badgeEmpty);
+    : (isSunday ? badgePending : '');
 
   const inbodyBadge = inbodySubmittedThisMonth
     ? badgeSubmitted
-    : (isInMonthWindow ? badgePending : badgeEmpty);
+    : (isInMonthWindow ? badgePending : '');
 
   const photosBadge = photosSubmittedThisMonth
     ? badgeSubmitted
-    : (isInMonthWindow ? badgePending : badgeEmpty);
-
+    : (isInMonthWindow ? badgePending : '');
 
       return `
       <div class="space-y-3 animate-fade">
@@ -4235,65 +4253,56 @@ async function handleExerciseVideoUpload(event, idx) {
     <!-- 1. Воскресный чек-ап -->
         <button
           onclick="openStudentReportSubscreen('checkup')"
-          class="h-[160px] flex flex-col items-center justify-between p-4 rounded-2xl bg-[#161B22] border border-[#30363D]"
+          class="relative aspect-square flex flex-col items-center justify-center gap-2.5 p-3 rounded-2xl bg-[#161B22] border border-[#30363D] active:scale-[0.98] transition-all"
         >
-          <div class="w-14 h-14 rounded-2xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center">
-            <i data-lucide="clipboard-check" class="w-6 h-6 text-[#00E676]"></i>
+          ${checkupBadge}
+          <div class="w-12 h-12 rounded-xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center shrink-0">
+            <i data-lucide="clipboard-check" class="w-5 h-5 text-[#00E676]"></i>
           </div>
-          <div class="flex flex-col items-center gap-1.5 w-full">
-            <span class="text-sm font-bold text-white tracking-wide text-center">
-              Воскресный чек-ап
-            </span>
-            ${checkupBadge}
-          </div>
+          <span class="text-xs font-semibold text-white tracking-wide text-center leading-tight">
+            Воскресный чек-ап
+          </span>
         </button>
 
         <!-- 2. Антропометрия -->
         <button
           onclick="openStudentReportSubscreen('anthropometry')"
-          class="h-[160px] flex flex-col items-center justify-between p-4 rounded-2xl bg-[#161B22] border border-[#30363D]"
+          class="relative aspect-square flex flex-col items-center justify-center gap-2.5 p-3 rounded-2xl bg-[#161B22] border border-[#30363D] active:scale-[0.98] transition-all"
         >
-          <div class="w-14 h-14 rounded-2xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center">
-            <i data-lucide="ruler" class="w-6 h-6 text-[#00E676]"></i>
+          <div class="w-12 h-12 rounded-xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center shrink-0">
+            <i data-lucide="ruler" class="w-5 h-5 text-[#00E676]"></i>
           </div>
-          <div class="flex flex-col items-center gap-1.5 w-full">
-            <span class="text-sm font-bold text-white tracking-wide text-center">
-              Антропометрия
-            </span>
-            <span class="h-5"></span>
-          </div>
+          <span class="text-xs font-semibold text-white tracking-wide text-center leading-tight">
+            Антропометрия
+          </span>
         </button>
 
         <!-- 3. Фото формы -->
         <button
           onclick="openStudentReportSubscreen('photos')"
-          class="h-[160px] flex flex-col items-center justify-between p-4 rounded-2xl bg-[#161B22] border border-[#30363D]"
+          class="relative aspect-square flex flex-col items-center justify-center gap-2.5 p-3 rounded-2xl bg-[#161B22] border border-[#30363D] active:scale-[0.98] transition-all"
         >
-          <div class="w-14 h-14 rounded-2xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center">
-            <i data-lucide="camera" class="w-6 h-6 text-[#00E676]"></i>
+          ${photosBadge}
+          <div class="w-12 h-12 rounded-xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center shrink-0">
+            <i data-lucide="camera" class="w-5 h-5 text-[#00E676]"></i>
           </div>
-          <div class="flex flex-col items-center gap-1.5 w-full">
-            <span class="text-sm font-bold text-white tracking-wide text-center">
-              Фотоотчёт
-            </span>
-            ${photosBadge}
-          </div>
+          <span class="text-xs font-semibold text-white tracking-wide text-center leading-tight">
+            Фотоотчёт
+          </span>
         </button>
 
         <!-- 4. InBody -->
         <button
           onclick="openStudentReportSubscreen('inbody')"
-          class="h-[160px] flex flex-col items-center justify-between p-4 rounded-2xl bg-[#161B22] border border-[#30363D]"
+          class="relative aspect-square flex flex-col items-center justify-center gap-2.5 p-3 rounded-2xl bg-[#161B22] border border-[#30363D] active:scale-[0.98] transition-all"
         >
-          <div class="w-14 h-14 rounded-2xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center">
-            <i data-lucide="scan-line" class="w-6 h-6 text-[#00E676]"></i>
+          ${inbodyBadge}
+          <div class="w-12 h-12 rounded-xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center shrink-0">
+            <i data-lucide="scan-line" class="w-5 h-5 text-[#00E676]"></i>
           </div>
-          <div class="flex flex-col items-center gap-1.5 w-full">
-            <span class="text-sm font-bold text-white tracking-wide text-center">
-              InBody
-            </span>
-            ${inbodyBadge}
-          </div>
+          <span class="text-xs font-semibold text-white tracking-wide text-center leading-tight">
+            InBody
+          </span>
         </button>
     </div>
   </div>
