@@ -1011,7 +1011,7 @@
             return null;
           }
 
-        const durationMinutes = Number(sub.session_duration_minutes) || (currentSt && currentSt.session_duration) || 60;
+        const durationMinutes = Number(sub?.session_duration_minutes ?? currentSt?.session_duration ?? 60);
 
         const { data: insertedBookings, error: bookError } = await supabaseClient
           .from('bookings')
@@ -1028,17 +1028,20 @@
         const createdBooking = (insertedBookings && insertedBookings.length > 0) ? insertedBookings[0] : null;
 
         const newUsedSessions = usedSessions + 1;
-        const { data: updatedSubs, error: updateError } = await supabaseClient
-          .from('subscriptions')
-          .update({ used_sessions: newUsedSessions })
-          .eq('id', sub.id)
-          .select();
+          let updatedSub = sub ? { ...sub, used_sessions: newUsedSessions } : null;
 
-        if (updateError) throw updateError;
+          if (sub?.id) {
+            const { data: updatedSubs, error: updateError } = await supabaseClient
+              .from('subscriptions')
+              .update({ used_sessions: newUsedSessions })
+              .eq('id', sub.id)
+              .select();
 
-        const updatedSub = (updatedSubs && updatedSubs.length > 0)
-          ? updatedSubs[0]
-          : { ...sub, used_sessions: newUsedSessions };
+            if (updateError) console.warn('Не удалось обновить subscriptions:', updateError);
+            if (updatedSubs && updatedSubs.length > 0) {
+              updatedSub = updatedSubs[0];
+            }
+          }
 
         currentSubscription = updatedSub;
         if (currentSt) {
