@@ -108,23 +108,37 @@
             booked_by: s.booked_by || null
           }));
         });
-        await supabaseClient
-          .from('student_reports')
-          .delete()
-          .eq('type', 'schedule_meta')
-          .eq('student_code', 'TRAINER_SCHEDULE');
-
         const safeNumericStudentId = toValidNumericIdOrNull(currentUser && currentUser.id);
-        await supabaseClient
+        const schedulePayload = JSON.stringify(compactSchedule);
+
+        const { data: existingRows } = await supabaseClient
           .from('student_reports')
-          .insert([{
-            student_id: safeNumericStudentId,
-            student_code: 'TRAINER_SCHEDULE',
-            type: 'schedule_meta',
-            photo_file_id: JSON.stringify(compactSchedule),
-            telegram_msg_id: 0,
-            created_at: new Date().toISOString()
-          }]);
+          .select('id')
+          .eq('type', 'schedule_meta')
+          .eq('student_code', 'TRAINER_SCHEDULE')
+          .limit(1);
+
+        if (Array.isArray(existingRows) && existingRows.length > 0) {
+          await supabaseClient
+            .from('student_reports')
+            .update({
+              student_id: safeNumericStudentId,
+              photo_file_id: schedulePayload,
+              telegram_msg_id: 0
+            })
+            .eq('id', existingRows[0].id);
+        } else {
+          await supabaseClient
+            .from('student_reports')
+            .insert([{
+              student_id: safeNumericStudentId,
+              student_code: 'TRAINER_SCHEDULE',
+              type: 'schedule_meta',
+              photo_file_id: schedulePayload,
+              telegram_msg_id: 0,
+              created_at: new Date().toISOString()
+            }]);
+        }
         return true;
       } catch (err) {
         console.warn('Не удалось сохранить слоты расписания в облако:', err);
@@ -156,7 +170,7 @@
             .from('users')
             .select('id')
             .eq('role', 'student')
-            .ilike('username', `${cleanCode}%`)
+            .or(`username.eq.${cleanCode},username.ilike.${cleanCode}|%`)
             .order('id', { ascending: false })
             .limit(1);
           if (findUserErr) {
@@ -852,7 +866,7 @@
             .from('users')
             .select('*')
             .eq('role', 'student')
-            .ilike('username', `${codeUpper}%`);
+            .or(`username.eq.${codeUpper},username.ilike.${codeUpper}|%`);
           if (Array.isArray(byCodeList) && byCodeList.length > 0) {
             user = byCodeList[byCodeList.length - 1];
           }
@@ -1869,7 +1883,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
     }
 
     async function autoProcessCompletedBookings() {
-      const todayIso = formatISO(getTodayDateObj());
+      const now = new Date();
       const expiredBookingIds = [];
       let changed = false;
 
@@ -1877,7 +1891,18 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
         if (!Array.isArray(st.active_bookings)) st.active_bookings = [];
         const remainingBookings = [];
         st.active_bookings.forEach(bk => {
-          if (bk.date && bk.date < todayIso) {
+          let isExpired = false;
+          if (bk.date && bk.time) {
+            const [y, m, d] = bk.date.split('-').map(Number);
+            const [hh, mm] = bk.time.split(':').map(Number);
+            const dur = Number(bk.duration || st.session_duration || 60);
+            const sessionEnd = new Date(y, (m || 1) - 1, d || 1, hh || 0, (mm || 0) + dur);
+            isExpired = now > sessionEnd;
+          } else if (bk.date) {
+            isExpired = bk.date < formatISO(getTodayDateObj());
+          }
+
+          if (isExpired) {
             releaseBookingEntryFromSchedule(st, bk);
             if (bk.id && !String(bk.id).startsWith('bk-')) {
               expiredBookingIds.push(bk.id);
@@ -1890,29 +1915,31 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
         st.active_bookings = remainingBookings;
       });
 
-      ensureSupabaseClient();
-      if (supabaseClient) {
-        try {
-          if (expiredBookingIds.length > 0) {
+      if (changed) {
+        saveAppData();
+        persistScheduleSlotsToSupabase();
+      }
+
+      Promise.resolve().then(async () => {
+        ensureSupabaseClient();
+        if (supabaseClient) {
+          try {
+            if (expiredBookingIds.length > 0) {
+              await supabaseClient
+                .from('bookings')
+                .update({ status: 'completed' })
+                .in('id', expiredBookingIds);
+            }
             await supabaseClient
               .from('bookings')
               .update({ status: 'completed' })
-              .in('id', expiredBookingIds);
+              .lt('session_date', formatISO(getTodayDateObj()))
+              .eq('status', 'confirmed');
+          } catch (err) {
+            console.warn('Не удалось архивировать прошедшие бронирования в Supabase:', err);
           }
-          await supabaseClient
-            .from('bookings')
-            .update({ status: 'completed' })
-            .lt('session_date', todayIso)
-            .eq('status', 'confirmed');
-        } catch (err) {
-          console.warn('Не удалось архивировать прошедшие бронирования в Supabase:', err);
         }
-      }
-
-      if (changed) {
-        await persistScheduleSlotsToSupabase();
-        saveAppData();
-      }
+      });
     }
 
     function getFallbackStudent(id = 'step-default', code = 'STEP-104') {
@@ -4734,21 +4761,32 @@ async function handleExerciseVideoUpload(event, idx) {
     async function applyTrainerGeneratedSchedule() {
       const iso = uiState.selectedTrainerScheduleDate;
       const existingDaySlots = appData.schedule_slots[iso] || [];
-      const newSlots = draftGeneratorSlots.map(s => ({
-        time: s.time,
-        duration: 60,
-        is_open: s.booked_by ? true : Boolean(s.is_open),
-        baseline_closed: s.booked_by ? Boolean(s.baseline_closed) : !Boolean(s.is_open),
-        booked_by: s.booked_by || null
-      }));
+      const bookedMap = new Map();
 
+      // Сохраняем все реальные текущие брони дня
+      existingDaySlots.forEach(s => {
+        if (s.booked_by) bookedMap.set(s.time, s.booked_by);
+      });
+
+      const newSlots = draftGeneratorSlots.map(s => {
+        const actualBooked = bookedMap.get(s.time) || s.booked_by || null;
+        return {
+          time: s.time,
+          duration: 60,
+          is_open: actualBooked ? true : Boolean(s.is_open),
+          baseline_closed: actualBooked ? false : !Boolean(s.is_open),
+          booked_by: actualBooked
+        };
+      });
+
+      // Переносим брони, которые выходят за рамки выбранного диапазона часов
       existingDaySlots.forEach(oldSlot => {
         if (oldSlot.booked_by && !newSlots.some(ns => ns.time === oldSlot.time)) {
           newSlots.push({
             time: oldSlot.time,
             duration: oldSlot.duration || 60,
             is_open: true,
-            baseline_closed: Boolean(oldSlot.baseline_closed),
+            baseline_closed: false,
             booked_by: oldSlot.booked_by
           });
         }
@@ -4756,11 +4794,16 @@ async function handleExerciseVideoUpload(event, idx) {
       newSlots.sort((a, b) => a.time.localeCompare(b.time));
 
       appData.schedule_slots[iso] = newSlots;
-      await persistScheduleSlotsToSupabase();
+      saveAppData();
       closeModal();
       renderApp();
       triggerHaptic('success');
-      showToast(`Расписание на ${formatHumanDate(iso)} сохранено в облаке!`);
+      showToast(`Расписание на ${formatHumanDate(iso)} сохранено!`);
+
+      // Фоновая отправка в базу
+      persistScheduleSlotsToSupabase().catch(err => {
+        console.warn('Ошибка сохранения расписания в Supabase:', err);
+      });
     }
 
     function renderTrainerSlotGeneratorModalContent() {
@@ -5120,12 +5163,15 @@ function copyInviteCode(code, name = '') {
       const studentName = String(name || '').trim();
       const inviteText = `Привет${studentName ? ', ' + studentName : ''}! Твой персональный код доступа к Step Value: ${cleanCode}\nВведи его при входе в приложение.`;
 
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-        navigator.clipboard.writeText(inviteText).then(() => {
-        }).catch(() => {
+      try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          navigator.clipboard.writeText(inviteText).catch(() => {
+            fallbackCopyText(cleanCode);
+          });
+        } else {
           fallbackCopyText(cleanCode);
-        });
-      } else {
+        }
+      } catch (err) {
         fallbackCopyText(cleanCode);
       }
     }
@@ -5227,36 +5273,32 @@ function copyInviteCode(code, name = '') {
           active_bookings: []
         };
 
-        // 1. Физически сохраняем ученика в Supabase (users, subscriptions, student_reports)
-        const savedOk = await syncStudentToCloud(newStudent);
-        if (!savedOk) {
-          return;
-        }
-
+        // 1. Мгновенно добавляем ученика в локальный список приложения
         if (!Array.isArray(appData.students)) {
           appData.students = [];
         }
-        const existingIdx = appData.students.findIndex(s =>
-          String(s.id) === String(newStudent.id) ||
-          (s.access_code && String(s.access_code).toUpperCase() === customCode)
-        );
-        if (existingIdx >= 0) {
-          appData.students[existingIdx] = newStudent;
-        } else {
-          appData.students.push(newStudent);
-        }
+        appData.students.push(newStudent);
         saveAppData();
 
-        // 2. Безопасно копируем инвайт-код в буфер обмена
-        copyInviteCode(customCode, fio);
-
-        // 3. Закрываем модалку и перерисовываем список
+        // 2. Закрываем модалку и мгновенно перерисовываем список без зависаний
         closeModal();
         renderApp();
-        showToast(`Подопечный ${fio} создан. Приглашение скопировано.`);
+        copyInviteCode(customCode, fio);
+        showToast(`Подопечный ${fio} создан!`);
+
+        // 3. В фоне синхронизируем с Supabase и подтягиваем реальный числовой ID
+        syncStudentToCloud(newStudent).then((savedOk) => {
+          if (savedOk) {
+            saveAppData();
+            renderTrainerStudentsRegistryListOnly();
+          }
+        }).catch((cloudErr) => {
+          console.error('Ошибка фонового сохранения ученика в Supabase:', cloudErr);
+        });
+
       } catch (err) {
         console.error('Ошибка в createNewStudentRecord:', err);
-        showToast('Ошибка при создании подопечного: ' + (err.message || 'неизвестная ошибка'), 'error');
+        showToast('Ошибка при создании: ' + (err.message || 'сбой формы'), 'error');
       }
     }
 
@@ -6380,6 +6422,15 @@ function copyInviteCode(code, name = '') {
     const updateHeaderBadge = renderHeader;
 
     function renderApp() {
+      // Защита от сброса фокуса и закрытия клавиатуры во время набора текста
+      const activeEl = document.activeElement;
+      const isTyping = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
+      const isModalOpen = !document.getElementById('modal-backdrop')?.classList.contains('hidden');
+      
+      if (isTyping || isModalOpen) {
+        return;
+      }
+
       destroyAllCharts();
       updateHeaderBadge();
       renderBottomTabBar();
