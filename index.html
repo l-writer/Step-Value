@@ -219,9 +219,16 @@
           }
         }
 
-        const totalSessions = Math.max(0, Number(st.subscription.total ?? st.subscription.total_sessions ?? 0) || 0);
-        const usedSessions = Math.min(totalSessions, Math.max(0, Number(st.subscription.used ?? st.subscription.used_sessions ?? 0) || 0));
-        const remainingSessions = Math.max(0, totalSessions - usedSessions);
+        const totalSessions = Math.max(0, Number(st.subscription.total_sessions ?? st.subscription.total ?? 0));
+    
+    // Если передан явный остаток, берем его за основу, иначе считаем из used
+    let remainingSessions = Number(st.subscription.remaining ?? (totalSessions - Number(st.subscription.used_sessions ?? st.subscription.used ?? 0)));
+    if (isNaN(remainingSessions)) remainingSessions = 0;
+    if (remainingSessions < 0) remainingSessions = 0;
+    if (totalSessions > 0 && remainingSessions > totalSessions) remainingSessions = totalSessions;
+
+    // Использованные строго равны разнице между пакетом и остатком
+    const usedSessions = Math.max(0, totalSessions - remainingSessions);
         const durationMins = Number(st.session_duration) || 60;
         const billingDay = Math.min(28, Math.max(1, Number(st.subscription.payment_day ?? st.subscription.billing_day) || 1));
         const subscriptionPrice = Number(st.price ?? st.subscription.price ?? parseNumericRubles(st.subscription.robokassa_sum)) || 0;
