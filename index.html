@@ -1328,7 +1328,9 @@
 
     function getTodayDateObj() {
       const now = new Date();
-      return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+      const fixedTime = new Date(utc + (3600000 * 3)); // Время по Москве (UTC+3)
+      return new Date(fixedTime.getFullYear(), fixedTime.getMonth(), fixedTime.getDate());
     }
 
     function formatISO(dateObj) {
@@ -2017,14 +2019,16 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
       content.innerHTML = htmlContent;
       backdrop.classList.remove('hidden');
       backdrop.classList.add('flex');
-      if (window.lucide && content) lucide.createIcons({ root: content });
-    }
+    document.body.style.overflow = 'hidden';
+    if (window.lucide && content) lucide.createIcons({ root: content });
+  }
 
     function closeModal() {
       const backdrop = document.getElementById('modal-backdrop');
       backdrop.classList.add('hidden');
       backdrop.classList.remove('flex');
-    }
+    document.body.style.overflow = '';
+  }
 
     function openResetModal() {
       triggerHaptic('light');
@@ -2724,6 +2728,10 @@ function renderOnboardingScreen() {
 
       await persistStudentToSupabase(student);
       await persistScheduleSlotsToSupabase();
+      
+      if (student.subscription && student.subscription.id) {
+        await supabaseClient.from('subscriptions').update({ used_sessions: student.subscription.used }).eq('id', student.subscription.id);
+      }
     }
   } catch (err) {
     console.warn("Ошибка синхронизации отмены с Supabase:", err);
@@ -3094,6 +3102,12 @@ async function handleExerciseVideoUpload(event, idx) {
 
   // Добавляем обработку в строгую очередь: второе видео ждёт окончания первого
   exerciseUploadChain = exerciseUploadChain.then(async () => {
+    const backdrop = document.getElementById('modal-backdrop');
+    if (backdrop) {
+      backdrop.innerHTML = '<div class="w-full h-full flex items-center justify-center text-[#00E676] font-bold text-center px-6 bg-black/80">Идёт сжатие и загрузка видео...<br>Пожалуйста, не закрывайте окно.</div>';
+      backdrop.classList.remove('hidden');
+      backdrop.classList.add('flex');
+    }
     try {
       if (!d.exercises[idx]) return;
 
@@ -3146,6 +3160,12 @@ async function handleExerciseVideoUpload(event, idx) {
       const msg = err && err.message ? err.message : 'Ошибка сети при загрузке';
       if (typeof showToast === 'function') showToast(msg, 'error');
     } finally {
+      const backdrop = document.getElementById('modal-backdrop');
+      if (backdrop) {
+        backdrop.innerHTML = '<div id="modal-content" class="w-full max-w-[440px] bg-[#161B22] border border-[#30363D] rounded-2xl p-5 shadow-2xl max-h-[90vh] overflow-y-auto"></div>';
+        backdrop.classList.remove('flex');
+        backdrop.classList.add('hidden');
+      }
       if (d.exercises[idx]) {
         delete d.exercises[idx].is_uploading;
         delete d.exercises[idx].upload_status;
@@ -4827,10 +4847,14 @@ async function handleExerciseVideoUpload(event, idx) {
             }
           }
           if (st) await persistStudentToSupabase(st);
-          await persistScheduleSlotsToSupabase();
-        } catch (e) {
-          console.warn('Ошибка отмены бронирования тренером в Supabase:', e);
-        }
+      await persistScheduleSlotsToSupabase();
+      
+      if (st && st.subscription && st.subscription.id) {
+        await supabaseClient.from('subscriptions').update({ used_sessions: st.subscription.used }).eq('id', st.subscription.id);
+      }
+    } catch (e) {
+      console.warn('Ошибка отмены бронирования тренером в Supabase:', e);
+    }
       }
       renderApp();
       triggerHaptic('warning');
