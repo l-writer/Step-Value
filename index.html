@@ -2717,42 +2717,37 @@ function renderOnboardingScreen() {
     student.subscription.remaining = Math.max(0, total - used);
   }
 
-  // 3. Синхронизируем возврат с Supabase
-  try {
-    ensureSupabaseClient();
-    if (supabaseClient) {
-      if (bookingId && !String(bookingId).startsWith('bk-')) {
-        await supabaseClient
-          .from('bookings')
-          .delete()
-          .eq('id', bookingId);
-      } else {
-        const targetNumericId = toValidNumericIdOrNull(student.supabase_id || student.id);
-        if (targetNumericId) {
-          await supabaseClient
-            .from('bookings')
-            .delete()
-            .eq('student_id', targetNumericId)
-            .eq('session_date', target.date)
-            .eq('session_time', target.time);
-        }
-      }
-
-      await persistStudentToSupabase(student);
-      await persistScheduleSlotsToSupabase();
-      
-      if (student.subscription && student.subscription.id) {
-        await supabaseClient.from('subscriptions').update({ used_sessions: student.subscription.used }).eq('id', student.subscription.id);
-      }
-    }
-  } catch (err) {
-    console.warn("Ошибка синхронизации отмены с Supabase:", err);
-  }
-
+  // ОПТИМИСТИЧНЫЙ UI: мгновенно сохраняем и перерисовываем
   saveAppData();
   triggerHaptic('warning');
-  showToast('Тренировка отменена. Занятие возвращено на баланс!');
+  showToast('Отмена брони... Занятие возвращено на баланс');
   renderApp();
+
+  // 3. Фоновая синхронизация с базой (без блокировки экрана)
+  Promise.resolve().then(async () => {
+    try {
+      ensureSupabaseClient();
+      if (supabaseClient) {
+        if (bookingId && !String(bookingId).startsWith('bk-')) {
+          await supabaseClient.from('bookings').delete().eq('id', bookingId);
+        } else {
+          const targetNumericId = toValidNumericIdOrNull(student.supabase_id || student.id);
+          if (targetNumericId) {
+            await supabaseClient.from('bookings').delete().eq('student_id', targetNumericId).eq('session_date', target.date).eq('session_time', target.time);
+          }
+        }
+
+        await persistStudentToSupabase(student);
+        await persistScheduleSlotsToSupabase();
+        
+        if (student.subscription && student.subscription.id) {
+          await supabaseClient.from('subscriptions').update({ used_sessions: student.subscription.used }).eq('id', student.subscription.id);
+        }
+      }
+    } catch (err) {
+      console.warn("Ошибка синхронизации отмены с Supabase:", err);
+    }
+  });
 }
 
     function startRescheduleStudentBooking(bookingId) {
@@ -4845,32 +4840,37 @@ async function handleExerciseVideoUpload(event, idx) {
           st.subscription.remaining = Math.max(0, total - used);
         }
       }
-      ensureSupabaseClient();
-      if (supabaseClient) {
-        try {
-          if (cancelledBookingId && !String(cancelledBookingId).startsWith('bk-')) {
-            await supabaseClient.from('bookings').delete().eq('id', cancelledBookingId);
-          } else if (st) {
-            const safeNumericId = toValidNumericIdOrNull(st.supabase_id || st.id);
-            if (safeNumericId) {
-              let delQ = supabaseClient.from('bookings').delete().eq('student_id', safeNumericId).eq('session_date', isoDate);
-              if (startTime) delQ = delQ.eq('session_time', startTime);
-              await delQ;
-            }
-          }
-          if (st) await persistStudentToSupabase(st);
-      await persistScheduleSlotsToSupabase();
-      
-      if (st && st.subscription && st.subscription.id) {
-        await supabaseClient.from('subscriptions').update({ used_sessions: st.subscription.used }).eq('id', st.subscription.id);
-      }
-    } catch (e) {
-      console.warn('Ошибка отмены бронирования тренером в Supabase:', e);
-    }
-      }
+      // Оптимистичный UI: мгновенно обновляем интерфейс тренера
       renderApp();
       triggerHaptic('warning');
       showToast(`Тренировка ${st ? st.full_name : ''} отменена. Занятие возвращено на баланс.`);
+
+      // Фоновая синхронизация
+      Promise.resolve().then(async () => {
+        ensureSupabaseClient();
+        if (supabaseClient) {
+          try {
+            if (cancelledBookingId && !String(cancelledBookingId).startsWith('bk-')) {
+              await supabaseClient.from('bookings').delete().eq('id', cancelledBookingId);
+            } else if (st) {
+              const safeNumericId = toValidNumericIdOrNull(st.supabase_id || st.id);
+              if (safeNumericId) {
+                let delQ = supabaseClient.from('bookings').delete().eq('student_id', safeNumericId).eq('session_date', isoDate);
+                if (startTime) delQ = delQ.eq('session_time', startTime);
+                await delQ;
+              }
+            }
+            if (st) await persistStudentToSupabase(st);
+            await persistScheduleSlotsToSupabase();
+            
+            if (st && st.subscription && st.subscription.id) {
+              await supabaseClient.from('subscriptions').update({ used_sessions: st.subscription.used }).eq('id', st.subscription.id);
+            }
+          } catch (e) {
+            console.warn('Ошибка отмены бронирования тренером в Supabase:', e);
+          }
+        }
+      });
     }
 
     async function toggleSingleTrainerHourQuick(isoDate, timeStr) {
