@@ -4187,7 +4187,41 @@ async function handleExerciseVideoUpload(event, idx) {
         return renderWeeklyCheckupScreen(student);
       }
 
-      const hasCheckup = Array.isArray(student.checkups) && student.checkups.length > 0;
+      const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth();
+  const todayDate = now.getDate();
+  const dayOfWeek = now.getDay(); // 0 = Воскресенье
+
+  // 1. Чек-ап: окно сдачи открыто только по воскресеньям (dayOfWeek === 0)
+  const isSunday = dayOfWeek === 0;
+  const startOfThisWeek = new Date(now);
+  startOfThisWeek.setDate(now.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+  startOfThisWeek.setHours(0, 0, 0, 0);
+
+  const checkupSubmittedThisWeek = Array.isArray(student.checkups) && student.checkups.some(c => {
+    if (!c.date) return false;
+    const parts = c.date.split('.');
+    const d = parts.length === 3 ? new Date(parts[2], parts[1] - 1, parts[0]) : new Date(c.date);
+    return d >= startOfThisWeek;
+  });
+
+  const badgeSubmitted = '<span class="text-[10px] font-bold text-[#00E676] bg-[#00E676]/10 px-2 py-0.5 rounded-full whitespace-nowrap">Сдано</span>';
+  const badgePending = '<span class="text-[10px] font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full whitespace-nowrap">Ожидает</span>';
+  const badgeEmpty = '<span class="h-5"></span>';
+
+  const checkupBadge = checkupSubmittedThisWeek
+    ? badgeSubmitted
+    : (isSunday ? badgePending : badgeEmpty);
+
+  const inbodyBadge = inbodySubmittedThisMonth
+    ? badgeSubmitted
+    : (isInMonthWindow ? badgePending : badgeEmpty);
+
+  const photosBadge = photosSubmittedThisMonth
+    ? badgeSubmitted
+    : (isInMonthWindow ? badgePending : badgeEmpty);
+
 
       return `
       <div class="space-y-3 animate-fade">
@@ -4199,70 +4233,68 @@ async function handleExerciseVideoUpload(event, idx) {
 
   <div class="grid grid-cols-2 gap-3">
     <!-- 1. Воскресный чек-ап -->
-    <button
-      onclick="openStudentReportSubscreen('checkup')"
-      class="flex flex-col items-center justify-center p-5 rounded-2xl bg-[#161B22] border border-[#21262D] transition-all active:scale-[0.98] min-h-[140px] aspect-[4/5] text-center group cursor-pointer"
-    >
-      <div class="w-14 h-14 rounded-2xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center mb-3 text-emerald-400 group-active:border-emerald-500/50 transition-colors">
-        <i data-lucide="clipboard-check" class="w-6 h-6"></i>
-      </div>
+        <button
+          onclick="openStudentReportSubscreen('checkup')"
+          class="h-[160px] flex flex-col items-center justify-between p-4 rounded-2xl bg-[#161B22] border border-[#30363D]"
+        >
+          <div class="w-14 h-14 rounded-2xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center">
+            <i data-lucide="clipboard-check" class="w-6 h-6 text-[#00E676]"></i>
+          </div>
+          <div class="flex flex-col items-center gap-1.5 w-full">
+            <span class="text-sm font-bold text-white tracking-wide text-center">
+              Воскресный чек-ап
+            </span>
+            ${checkupBadge}
+          </div>
+        </button>
 
-      <!-- Обертка заголовка с привязанным бейджем -->
-      <div class="relative flex flex-col items-center">
-        <span class="text-sm font-bold text-white tracking-wide">
-          Воскресный чек-ап
-        </span>
+        <!-- 2. Антропометрия -->
+        <button
+          onclick="openStudentReportSubscreen('anthropometry')"
+          class="h-[160px] flex flex-col items-center justify-between p-4 rounded-2xl bg-[#161B22] border border-[#30363D]"
+        >
+          <div class="w-14 h-14 rounded-2xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center">
+            <i data-lucide="ruler" class="w-6 h-6 text-[#00E676]"></i>
+          </div>
+          <div class="flex flex-col items-center gap-1.5 w-full">
+            <span class="text-sm font-bold text-white tracking-wide text-center">
+              Антропометрия
+            </span>
+            <span class="h-5"></span>
+          </div>
+        </button>
 
-        ${hasCheckup ? `
-          <span class="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 text-[10px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 whitespace-nowrap">
-            Сдано
-          </span>
-        ` : `
-          <span class="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 text-[10px] font-semibold px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 whitespace-nowrap">
-            Ждёт
-          </span>
-        `}
-      </div>
-    </button>
+        <!-- 3. Фото формы -->
+        <button
+          onclick="openStudentReportSubscreen('photos')"
+          class="h-[160px] flex flex-col items-center justify-between p-4 rounded-2xl bg-[#161B22] border border-[#30363D]"
+        >
+          <div class="w-14 h-14 rounded-2xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center">
+            <i data-lucide="camera" class="w-6 h-6 text-[#00E676]"></i>
+          </div>
+          <div class="flex flex-col items-center gap-1.5 w-full">
+            <span class="text-sm font-bold text-white tracking-wide text-center">
+              Фотоотчёт
+            </span>
+            ${photosBadge}
+          </div>
+        </button>
 
-    <!-- 2. Антропометрия -->
-    <button
-      onclick="openStudentReportSubscreen('anthropometry')"
-      class="flex flex-col items-center justify-center p-5 rounded-2xl bg-[#161B22] border border-[#21262D] transition-all active:scale-[0.98] min-h-[140px] aspect-[4/5] text-center group cursor-pointer"
-    >
-      <div class="w-14 h-14 rounded-2xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center mb-3 text-emerald-400 group-active:border-emerald-500/50 transition-colors">
-        <i data-lucide="ruler" class="w-6 h-6"></i>
-      </div>
-      <span class="text-sm font-bold text-white tracking-wide">
-        Антропометрия
-      </span>
-    </button>
-
-    <!-- 3. Фото формы -->
-    <button
-      onclick="openStudentReportSubscreen('photos')"
-      class="flex flex-col items-center justify-center p-5 rounded-2xl bg-[#161B22] border border-[#21262D] transition-all active:scale-[0.98] min-h-[140px] aspect-[4/5] text-center group cursor-pointer"
-    >
-      <div class="w-14 h-14 rounded-2xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center mb-3 text-emerald-400 group-active:border-emerald-500/50 transition-colors">
-        <i data-lucide="camera" class="w-6 h-6"></i>
-      </div>
-      <span class="text-sm font-bold text-white tracking-wide">
-        Фотоотчёт
-      </span>
-    </button>
-
-    <!-- 4. InBody -->
-    <button
-      onclick="openStudentReportSubscreen('inbody')"
-      class="flex flex-col items-center justify-center p-5 rounded-2xl bg-[#161B22] border border-[#21262D] transition-all active:scale-[0.98] min-h-[140px] aspect-[4/5] text-center group cursor-pointer"
-    >
-      <div class="w-14 h-14 rounded-2xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center mb-3 text-emerald-400 group-active:border-emerald-500/50 transition-colors">
-        <i data-lucide="scan-line" class="w-6 h-6"></i>
-      </div>
-      <span class="text-sm font-bold text-white tracking-wide">
-        InBody
-      </span>
-    </button>
+        <!-- 4. InBody -->
+        <button
+          onclick="openStudentReportSubscreen('inbody')"
+          class="h-[160px] flex flex-col items-center justify-between p-4 rounded-2xl bg-[#161B22] border border-[#30363D]"
+        >
+          <div class="w-14 h-14 rounded-2xl bg-[#0D1117] border border-[#30363D] flex items-center justify-center">
+            <i data-lucide="scan-line" class="w-6 h-6 text-[#00E676]"></i>
+          </div>
+          <div class="flex flex-col items-center gap-1.5 w-full">
+            <span class="text-sm font-bold text-white tracking-wide text-center">
+              InBody
+            </span>
+            ${inbodyBadge}
+          </div>
+        </button>
   </div>
 </div>
       `;
@@ -4535,31 +4567,7 @@ async function handleExerciseVideoUpload(event, idx) {
             </button>
           </div>
 
-          <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-4 space-y-3">
-            <h3 class="text-xs font-bold uppercase tracking-wider text-[#8B949E]">Умные уведомления в Telegram</h3>
-
-            <div class="flex items-center justify-between py-1">
-              <span class="text-xs text-white">Напоминание о тренировке</span>
-              <div class="flex gap-1.5">
-                <button onclick="updateStudentNotificationSetting('workout_reminder', '2h')" class="px-2.5 py-1 rounded-lg text-xs font-bold border ${notif.workout_reminder === '2h' ? 'bg-[#10B981] text-[#090C10] border-[#00E676]' : 'bg-[#090C10] text-[#8B949E] border-[#30363D]'}">За 2 ч</button>
-                <button onclick="updateStudentNotificationSetting('workout_reminder', '4h')" class="px-2.5 py-1 rounded-lg text-xs font-bold border ${notif.workout_reminder === '4h' ? 'bg-[#10B981] text-[#090C10] border-[#00E676]' : 'bg-[#090C10] text-[#8B949E] border-[#30363D]'}">За 4 ч</button>
-              </div>
-            </div>
-
-            <div class="flex items-center justify-between py-1 border-t border-[#30363D]/60">
-              <span class="text-xs text-white">Напоминание о воскресном чек-апе</span>
-              <button onclick="updateStudentNotificationSetting('sunday_checkup', ${!notif.sunday_checkup})" class="w-11 h-6 rounded-full p-0.5 transition ${notif.sunday_checkup ? 'bg-[#00E676]' : 'bg-[#090C10] border border-[#30363D]'} flex items-center">
-                <div class="w-4 h-4 rounded-full transition transform ${notif.sunday_checkup ? 'translate-x-5 bg-[#090C10]' : 'translate-x-0 bg-[#8B949E]'}"></div>
-              </button>
-            </div>
-
-            <div class="flex items-center justify-between py-1 border-t border-[#30363D]/60">
-              <span class="text-xs text-white">InBody и фотоотчёт (за 3 дня до конца мес.)</span>
-              <button onclick="updateStudentNotificationSetting('monthly_inbody_photos', ${!notif.monthly_inbody_photos})" class="w-11 h-6 rounded-full p-0.5 transition ${notif.monthly_inbody_photos ? 'bg-[#00E676]' : 'bg-[#090C10] border border-[#30363D]'} flex items-center">
-                <div class="w-4 h-4 rounded-full transition transform ${notif.monthly_inbody_photos ? 'translate-x-5 bg-[#090C10]' : 'translate-x-0 bg-[#8B949E]'}"></div>
-              </button>
-            </div>
-          </div>
+          
         </div>
       `;
     }
