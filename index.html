@@ -5361,23 +5361,24 @@ function copyInviteCode(code, name = '') {
   const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId));
   if (!st || !st.subscription) return;
 
-  syncTrainerManagementDraftFromDOM(st);
-
   const total = Math.max(0, Number(st.subscription.total_sessions ?? st.subscription.total ?? 0));
 
-  // Текущий остаток
-  let currentRemaining = Number(st.subscription.remaining ?? (total - Number(st.subscription.used_sessions ?? st.subscription.used ?? 0)));
-  if (isNaN(currentRemaining)) currentRemaining = 0;
+  // Текущий остаток берем строго из объекта
+  let currentRemaining = Number(st.subscription.remaining);
+  if (isNaN(currentRemaining)) {
+    const currentUsed = Number(st.subscription.used_sessions ?? st.subscription.used ?? 0);
+    currentRemaining = Math.max(0, total - currentUsed);
+  }
 
-  // Изменяем остаток: не меньше 0, и не больше общего пакета total (если total > 0)
+  // Применяем дельту (+1 или -1)
   let newRemaining = currentRemaining + delta;
   if (newRemaining < 0) newRemaining = 0;
   if (total > 0 && newRemaining > total) newRemaining = total;
 
-  // Считаем использованные
+  // Использованные строго равны разнице
   const newUsed = Math.max(0, total - newRemaining);
 
-  // Записываем во все поля для синхронизации
+  // Синхронно обновляем все связанные поля
   st.subscription.total = total;
   st.subscription.total_sessions = total;
   st.subscription.remaining = newRemaining;
@@ -5397,14 +5398,20 @@ function copyInviteCode(code, name = '') {
       syncTrainerManagementDraftFromDOM(st);
 
       const newTotal = Math.max(0, parseInt(totalVal, 10) || 0);
-      const currentUsed = Math.min(newTotal, Math.max(0, Number(st.subscription.used_sessions ?? st.subscription.used ?? 0) || 0));
-      const remaining = Math.max(0, newTotal - currentUsed);
 
-      st.subscription.total = newTotal;
-      st.subscription.total_sessions = newTotal;
-      st.subscription.used = currentUsed;
-      st.subscription.used_sessions = currentUsed;
-      st.subscription.remaining = remaining;
+    // Сохраняем текущий остаток, но не даем ему быть больше нового пакета
+    let currentRem = Number(st.subscription.remaining ?? (newTotal - Number(st.subscription.used_sessions ?? st.subscription.used ?? 0)));
+    if (isNaN(currentRem)) currentRem = 0;
+    if (currentRem < 0) currentRem = 0;
+    if (newTotal > 0 && currentRem > newTotal) currentRem = newTotal;
+
+    const currentUsed = Math.max(0, newTotal - currentRem);
+
+    st.subscription.total = newTotal;
+    st.subscription.total_sessions = newTotal;
+    st.subscription.used = currentUsed;
+    st.subscription.used_sessions = currentUsed;
+    st.subscription.remaining = currentRem;
 
       await persistStudentToSupabase(st);
       renderApp();
