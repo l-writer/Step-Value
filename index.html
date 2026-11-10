@@ -2811,8 +2811,7 @@ function renderOnboardingScreen() {
             </div>
             ${(() => {
                 const total = Math.max(0, Number(sub.total_sessions ?? sub.total ?? 0) || 0);
-                const activeCount = Array.isArray(student.active_bookings) ? student.active_bookings.length : 0;
-                const rem = Math.max(0, Math.min(total, Number(sub.remaining !== undefined ? sub.remaining : (total - activeCount))));
+                const rem = Math.max(0, Number(sub.remaining !== undefined ? sub.remaining : (total - Number(sub.used ?? 0))));
                 const percent = total > 0 ? Math.min(100, Math.round((rem / total) * 100)) : 0;
                 return `
                 <div class="mb-2.5">
@@ -2863,7 +2862,7 @@ function renderOnboardingScreen() {
                   <i data-lucide="calendar-check-2" class="w-4 h-4"></i>
                   Активная запись (${activeBookings.length})
                 </span>
-                <span class="text-[11px] text-[#8B949E]">Можно занять ещё ${Math.max(0, sub.remaining - activeBookings.length)}</span>
+                <span class="text-[11px] text-[#8B949E]">Остаток по абонементу: ${Math.max(0, sub.remaining)}</span>
               </div>
 
               <div class="space-y-2.5">
