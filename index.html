@@ -233,18 +233,16 @@
           }
         }
 
-        const totalSessions = Math.max(0, Number(st.subscription.total_sessions ?? st.subscription.total ?? 0));
-    
-    // Если передан явный остаток, берем его за основу, иначе считаем из used
-    let remainingSessions = Number(st.subscription.remaining);
-    if (isNaN(remainingSessions)) {
-      const prevUsed = Number(st.subscription.used_sessions ?? st.subscription.used ?? 0);
-      remainingSessions = Math.max(0, totalSessions - prevUsed);
-    }
-    if (remainingSessions < 0) remainingSessions = 0;
-    if (totalSessions > 0 && remainingSessions > totalSessions) remainingSessions = totalSessions;
+        const totalSessions = Math.max(0, Number(st.subscription?.total_sessions ?? st.subscription?.total ?? 8));
+        const rawUsed = Number(st.subscription?.used_sessions ?? st.subscription?.used ?? 0);
+        const usedSessions = isNaN(rawUsed) ? 0 : Math.max(0, rawUsed);
 
-    const usedSessions = Math.max(0, totalSessions - remainingSessions);
+        let remainingSessions = Number(st.subscription?.remaining);
+        if (isNaN(remainingSessions)) {
+          remainingSessions = Math.max(0, totalSessions - usedSessions);
+        }
+        if (remainingSessions < 0) remainingSessions = 0;
+        if (totalSessions > 0 && remainingSessions > totalSessions) remainingSessions = totalSessions;
         const durationMins = Number(st.session_duration) || 60;
         const billingDay = Math.min(28, Math.max(1, Number(st.subscription.payment_day ?? st.subscription.billing_day) || 1));
         const subscriptionPrice = Number(st.price ?? st.subscription.price ?? parseNumericRubles(st.subscription.robokassa_sum)) || 0;
@@ -704,10 +702,13 @@
             ? metaTotalVal
             : (!isNaN(subTotalVal) ? subTotalVal : (Number(prevSt?.subscription?.total ?? 0) || 0)));
 
-          let remaining = Number(metaSub?.remaining ?? prevSt?.subscription?.remaining);
+          let remaining = Number(metaSub?.remaining ?? userSub?.remaining ?? prevSt?.subscription?.remaining);
           if (isNaN(remaining)) {
             const usedVal = Number(userSub?.used_sessions ?? metaSub?.used ?? metaSub?.used_sessions ?? prevSt?.subscription?.used ?? 0);
             remaining = Math.max(0, total - usedVal);
+          }
+          if (isNaN(remaining) || (total > 0 && remaining === 0 && (!userSub || Number(userSub.used_sessions) === 0))) {
+            remaining = total;
           }
           if (remaining < 0) remaining = 0;
           if (total > 0 && remaining > total) remaining = total;
@@ -5237,6 +5238,9 @@ function copyInviteCode(code, name = '') {
         const parts = fio.split(' ');
         const initials = ((parts[0] ? parts[0][0] : 'А') + (parts[1] ? parts[1][0] : 'Т')).toUpperCase();
 
+        const resolvedPack = pack > 0 ? pack : 8;
+        const resolvedPrice = price > 0 ? price : 15000;
+
         const newStudent = {
           id: 'step-' + Date.now(),
           supabase_id: null,
@@ -5246,19 +5250,19 @@ function copyInviteCode(code, name = '') {
           avatar: initials,
           status: 'active',
           freeze_details: { is_frozen: false, from: '', to: '' },
-          price: price,
+          price: resolvedPrice,
           session_duration: dur,
           subscription: {
             id: null,
-            price: price,
-            total: pack,
-            total_sessions: pack,
+            price: resolvedPrice,
+            total: resolvedPack,
+            total_sessions: resolvedPack,
             used: 0,
             used_sessions: 0,
-            remaining: pack,
+            remaining: resolvedPack,
             payment_day: 1,
             billing_day: 1,
-            robokassa_sum: formatRublesFromNumber(price),
+            robokassa_sum: formatRublesFromNumber(resolvedPrice),
             robokassa_url: ''
           },
           payment_history: [],
