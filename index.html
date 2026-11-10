@@ -2432,10 +2432,18 @@ function renderOnboardingScreen() {
     }
 
     function selectStudentBookingDate(isoDate) {
-      triggerHaptic('light');
-      uiState.selectedBookingDate = isoDate;
-      renderApp();
+    triggerHaptic('light');
+    uiState.selectedBookingDate = isoDate;
+    
+    // Точечно обновляем только вкладку записи, не трогая шапку и графики
+    const main = document.getElementById('app-main');
+    if (main) {
+        main.innerHTML = renderStudentBookingTab();
+        if (window.lucide) window.lucide.createIcons({ root: main });
+    } else {
+        renderApp();
     }
+}
 
     // П.4: Фильтрация прошедших часов на сегодня + часовой буфер (lead time)
     function computeFittableSlotsForStudent(isoDate, durationMinutes) {
