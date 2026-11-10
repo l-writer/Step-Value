@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <title>Step Value — Персональный трекер</title>
+  <title>Step Value — Персональный фитнес-хаб</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
@@ -5559,13 +5559,23 @@ if (targetCode) {
         return `<div class="p-6 text-center text-xs text-[#8B949E] bg-[#161B22] rounded-2xl border border-[#30363D]">Подопечные по запросу не найдены</div>`;
       }
       return sorted.map(st => {
-        const isFrozen = st.freeze_details && st.freeze_details.is_frozen;
-        return `
-          <div onclick="openTrainerStudentPage('${st.id}')" class="bg-[#161B22] hover:bg-[#1F242C] border border-[#30363D] hover:border-[#10B981] rounded-2xl p-4 flex items-center justify-between gap-3 cursor-pointer transition group">
-            <div class="flex items-center gap-3 min-w-0">
-              <div class="w-11 h-11 rounded-xl bg-[#0D1117] border border-[#30363D] group-hover:border-[#00E676] text-[#00E676] font-extrabold text-sm flex items-center justify-center shrink-0">
-                ${st.avatar || 'АТ'}
-              </div>
+  const isFrozen = st.freeze_details && st.freeze_details.is_frozen;
+  const workouts = Array.isArray(st.workouts) ? st.workouts : [];
+  const hasUnreviewed = workouts.some(w => !(w.trainer_comment || w.trainer_feedback || w.status === 'reviewed'));
+  const avatarBoxClass = hasUnreviewed
+    ? 'w-11 h-11 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-400 grid place-items-center shrink-0'
+    : 'w-11 h-11 rounded-xl bg-[#0D1117] border border-[#30363D] text-[#8B949E] grid place-items-center shrink-0';
+
+  const avatarIconMarkup = hasUnreviewed
+    ? '<i data-lucide="clipboard-check" class="w-5 h-5"></i>'
+    : '<i data-lucide="user" class="w-5 h-5"></i>';
+
+  return `
+    <div onclick="openTrainerStudentPage('${st.id}')" class="bg-[#161B22] hover:bg-[#1C2128] transition p-3.5 rounded-2xl border border-[#30363D] flex items-center justify-between cursor-pointer group">
+      <div class="flex items-center gap-3 min-w-0">
+        <div class="${avatarBoxClass}">
+          ${avatarIconMarkup}
+        </div>
               <div class="min-w-0">
                 <div class="flex items-center gap-2">
                   <h4 class="text-sm font-bold text-white truncate group-hover:text-[#00E676] transition">${st.full_name}</h4>
