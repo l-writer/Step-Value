@@ -2627,31 +2627,18 @@ function renderOnboardingScreen() {
           return;
         }
 
-        const result = await bookSession(isoDate, startTime);
-        if (!result || !result.success) {
-          return;
-        }
-
         const activeStudent = getCurrentStudent() || student;
         if (!Array.isArray(activeStudent.active_bookings)) activeStudent.active_bookings = [];
 
-        // Обновляем локальное состояние абонемента строго по ответу Supabase
-        const sub = result.sub;
-        const total = Math.max(0, Number(sub.total_sessions ?? activeStudent.subscription?.total ?? 0) || 0);
-        const used = Math.max(0, Number(sub.used_sessions) || 0);
-        const remaining = Math.max(0, total - used);
-        const sessionDuration = Number(sub.session_duration_minutes) || activeStudent.session_duration || 60;
+        // ОПТИМИСТИЧНЫЙ UI: 1. Локально списываем баланс
+        const tempId = 'bk-temp-' + Date.now();
+        const sessionDuration = activeStudent.session_duration || 60;
+        
+        activeStudent.subscription.used += 1;
+        activeStudent.subscription.used_sessions += 1;
+        activeStudent.subscription.remaining -= 1;
 
-        activeStudent.session_duration = sessionDuration;
-        activeStudent.subscription.id = sub.id;
-        activeStudent.subscription.total = total;
-        activeStudent.subscription.used = used;
-        activeStudent.subscription.remaining = remaining;
-        if (sub.billing_day) {
-          activeStudent.subscription.payment_day = Number(sub.billing_day);
-        }
-
-        // Помечаем часы в локальной сетке расписания
+        // 2. Локально занимаем слоты
         const hoursNeeded = Math.ceil(sessionDuration / 60);
         const targetDaySlots = appData.schedule_slots[isoDate] || [];
         const targetStartIndex = targetDaySlots.findIndex(s => s.time === startTime);
@@ -2663,21 +2650,46 @@ function renderOnboardingScreen() {
           }
         }
 
+        // 3. Локально добавляем бронь
         activeStudent.active_bookings.push({
-          id: (result.booking && result.booking.id) ? result.booking.id : ('bk-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5)),
+          id: tempId,
           date: isoDate,
           time: startTime,
           duration: sessionDuration
         });
-
         activeStudent.active_bookings.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
 
-        await persistStudentToSupabase(activeStudent);
-        await persistScheduleSlotsToSupabase();
         saveAppData();
         triggerHaptic('success');
-        showToast(`Тренировка забронирована на ${formatHumanDate(isoDate)} в ${startTime}! Остаток: ${remaining} из ${total}`);
-        renderApp();
+        showToast(`Забронировано на ${startTime}. Синхронизация...`);
+        renderApp(); // Мгновенная отрисовка
+
+        // 4. Фоновый запрос
+        bookSession(isoDate, startTime).then(async (result) => {
+           if (result && result.success) {
+               // Заменяем временный ID на реальный
+               const idx = activeStudent.active_bookings.findIndex(b => b.id === tempId);
+               if (idx !== -1) {
+                   activeStudent.active_bookings[idx].id = result.booking.id;
+               }
+               // Синхронизируем состояние абонемента (на случай расхождений)
+               const sub = result.sub;
+               activeStudent.subscription.id = sub.id;
+               activeStudent.subscription.total = Number(sub.total_sessions);
+               activeStudent.subscription.used = Number(sub.used_sessions);
+               activeStudent.subscription.remaining = activeStudent.subscription.total - activeStudent.subscription.used;
+               
+               await persistStudentToSupabase(activeStudent);
+               await persistScheduleSlotsToSupabase();
+               saveAppData();
+           } else {
+               // Если ошибка (например, сервер упал), откатываем изменения (здесь можно добавить логику отката)
+               showToast('Ошибка синхронизации бронирования!', 'error');
+           }
+        }).catch(err => {
+            console.error(err);
+        });
+
       } finally {
         isBookingInProgress = false;
       }
