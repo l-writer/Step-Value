@@ -984,30 +984,32 @@
         }
 
         let { data: subsList, error: subError } = await supabaseClient
-          .from('subscriptions')
-          .select('*')
-          .eq('student_id', userId)
-          .eq('status', 'active')
-          .order('id', { ascending: false })
-          .limit(1);
+            .from('subscriptions')
+            .select('*')
+            .eq('student_id', userId)
+            .order('id', { ascending: false })
+            .limit(1);
 
-        if (subError) throw subError;
+          if (subError) throw subError;
 
-        let sub = (subsList && subsList.length > 0) ? subsList[0] : null;
+          let sub = (subsList && subsList.length > 0) ? subsList[0] : null;
 
-        if (!sub) {
-          notifyUser('У вас пока нет активного пакета тренировок. Обратитесь к тренеру.', 'error');
-          return null;
-        }
+          const totalSessions = Math.max(0, Number(sub?.total_sessions ?? currentSt?.subscription?.total ?? 0));
+          const usedSessions = Math.max(0, Number(sub?.used_sessions ?? currentSt?.subscription?.used ?? 0));
+          let remainingSessions = Number(sub?.remaining ?? currentSt?.subscription?.remaining);
+          if (isNaN(remainingSessions)) {
+            remainingSessions = Math.max(0, totalSessions - usedSessions);
+          }
 
-        const totalSessions = Math.max(0, Number(sub.total_sessions) || 0);
-        const usedSessions = Math.max(0, Number(sub.used_sessions) || 0);
-        const remainingSessions = totalSessions - usedSessions;
+          // Проверяем остаток: сначала по объекту из базы, затем по текущему профилю ученика
+          const effectiveRemaining = (remainingSessions > 0) 
+            ? remainingSessions 
+            : Number(currentSt?.subscription?.remaining ?? 0);
 
-        if (remainingSessions <= 0) {
-          notifyUser('Закончились тренировки в абонементе! Обновите абонемент для записи.', 'error');
-          return null;
-        }
+          if (effectiveRemaining <= 0) {
+            notifyUser('Закончились тренировки в абонементе! Обратитесь к тренеру.', 'error');
+            return null;
+          }
 
         const durationMinutes = Number(sub.session_duration_minutes) || (currentSt && currentSt.session_duration) || 60;
 
