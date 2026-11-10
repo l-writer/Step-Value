@@ -222,12 +222,14 @@
         const totalSessions = Math.max(0, Number(st.subscription.total_sessions ?? st.subscription.total ?? 0));
     
     // Если передан явный остаток, берем его за основу, иначе считаем из used
-    let remainingSessions = Number(st.subscription.remaining ?? (totalSessions - Number(st.subscription.used_sessions ?? st.subscription.used ?? 0)));
-    if (isNaN(remainingSessions)) remainingSessions = 0;
+    let remainingSessions = Number(st.subscription.remaining);
+    if (isNaN(remainingSessions)) {
+      const prevUsed = Number(st.subscription.used_sessions ?? st.subscription.used ?? 0);
+      remainingSessions = Math.max(0, totalSessions - prevUsed);
+    }
     if (remainingSessions < 0) remainingSessions = 0;
     if (totalSessions > 0 && remainingSessions > totalSessions) remainingSessions = totalSessions;
 
-    // Использованные строго равны разнице между пакетом и остатком
     const usedSessions = Math.max(0, totalSessions - remainingSessions);
         const durationMins = Number(st.session_duration) || 60;
         const billingDay = Math.min(28, Math.max(1, Number(st.subscription.payment_day ?? st.subscription.billing_day) || 1));
@@ -688,14 +690,15 @@
             ? metaTotalVal
             : (!isNaN(subTotalVal) ? subTotalVal : (Number(prevSt?.subscription?.total ?? 0) || 0)));
 
-          const hasMetaUsed = metaSub && (metaSub.used !== undefined || metaSub.used_sessions !== undefined);
-          const metaUsedVal = hasMetaUsed ? Number(metaSub.used ?? metaSub.used_sessions ?? 0) : NaN;
-          const subUsedVal = userSub ? Number(userSub.used_sessions ?? 0) : NaN;
-          const used = Math.min(total, Math.max(0, (!isNaN(metaUsedVal) && (metaUsedVal > 0 || !subUsedVal))
-            ? metaUsedVal
-            : (!isNaN(subUsedVal) ? subUsedVal : (Number(prevSt?.subscription?.used ?? 0) || 0))));
+          let remaining = Number(metaSub?.remaining ?? prevSt?.subscription?.remaining);
+          if (isNaN(remaining)) {
+            const usedVal = Number(userSub?.used_sessions ?? metaSub?.used ?? metaSub?.used_sessions ?? prevSt?.subscription?.used ?? 0);
+            remaining = Math.max(0, total - usedVal);
+          }
+          if (remaining < 0) remaining = 0;
+          if (total > 0 && remaining > total) remaining = total;
 
-          const remaining = Math.max(0, total - used);
+          const used = Math.max(0, total - remaining);
           const dur = Number(meta?.session_duration ?? userSub?.session_duration_minutes ?? prevSt?.session_duration) || 60;
           const billDay = Math.min(28, Math.max(1, Number(metaSub?.payment_day ?? metaSub?.billing_day ?? userSub?.billing_day ?? prevSt?.subscription?.payment_day) || 1));
 
