@@ -5392,31 +5392,33 @@ function copyInviteCode(code, name = '') {
 }
 
     async function updateStudentTotalSubscription(studentId, totalVal) {
-      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
-      if (!st || !st.subscription) return;
+  const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId));
+  if (!st || !st.subscription) return;
 
-      syncTrainerManagementDraftFromDOM(st);
+  const newTotal = Math.max(0, parseInt(totalVal, 10) || 0);
 
-      const newTotal = Math.max(0, parseInt(totalVal, 10) || 0);
+  // Берём текущий остаток напрямую, без вычитания used_sessions
+  let currentRem = Number(st.subscription.remaining);
+  if (isNaN(currentRem)) {
+    const prevUsed = Number(st.subscription.used_sessions ?? st.subscription.used ?? 0);
+    currentRem = Math.max(0, newTotal - prevUsed);
+  }
+  if (newTotal > 0 && currentRem > newTotal) {
+    currentRem = newTotal;
+  }
 
-    // Сохраняем текущий остаток, но не даем ему быть больше нового пакета
-    let currentRem = Number(st.subscription.remaining ?? (newTotal - Number(st.subscription.used_sessions ?? st.subscription.used ?? 0)));
-    if (isNaN(currentRem)) currentRem = 0;
-    if (currentRem < 0) currentRem = 0;
-    if (newTotal > 0 && currentRem > newTotal) currentRem = newTotal;
+  const currentUsed = Math.max(0, newTotal - currentRem);
 
-    const currentUsed = Math.max(0, newTotal - currentRem);
+  st.subscription.total = newTotal;
+  st.subscription.total_sessions = newTotal;
+  st.subscription.used = currentUsed;
+  st.subscription.used_sessions = currentUsed;
+  st.subscription.remaining = currentRem;
 
-    st.subscription.total = newTotal;
-    st.subscription.total_sessions = newTotal;
-    st.subscription.used = currentUsed;
-    st.subscription.used_sessions = currentUsed;
-    st.subscription.remaining = currentRem;
-
-      await persistStudentToSupabase(st);
-      renderApp();
-      showToast(`Пакет обновлён в базе: ${remaining} из ${newTotal} занятий`);
-    }
+  await persistStudentToSupabase(st);
+  renderApp();
+  showToast(`Пакет обновлён в базе: ${currentRem} из ${newTotal} занятий`);
+}
 
     async function setStudentSessionDuration(studentId, durationMins) {
       const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
@@ -6062,7 +6064,7 @@ if (targetCode) {
               <div class="grid grid-cols-2 gap-3 items-center">
                 <div>
                   <label class="block text-[11px] text-[#8B949E] mb-1">Пакет тренировок (всего)</label>
-                  <input id="tr-mgmt-total-pack" type="number" min="0" max="100" value="${st.subscription.total > 0 ? st.subscription.total : ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" onchange="updateStudentTotalSubscription('${st.id}', this.value)" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-sm font-extrabold text-white outline-none" />
+                  <input id="tr-mgmt-total-pack" type="number" min="0" max="100" value="${st.subscription.total > 0 ? st.subscription.total : ''}" placeholder="0" onfocus="if(this.value==='0') this.value=''; this.select();" onblur="updateStudentTotalSubscription('${st.id}', this.value)" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-sm font-extrabold text-white outline-none" />
                 </div>
                 <div>
                   <span class="block text-[11px] text-[#8B949E] mb-1">Текущий остаток: <strong class="text-[#00E676]">${st.subscription.remaining}</strong></span>
