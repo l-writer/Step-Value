@@ -4844,9 +4844,16 @@ async function handleExerciseVideoUpload(event, idx) {
       const daySlots = appData.schedule_slots[iso] || [];
 
       const renderedRows = [];
+      const todayIso = formatISO(getTodayDateObj());
+      const isToday = iso === todayIso;
+      const currentHour = new Date().getHours();
+
       let i = 0;
       while (i < daySlots.length) {
         const s = daySlots[i];
+        const slotHour = parseInt(s.time.split(':')[0], 10);
+        const isPast = isToday && slotHour <= currentHour;
+
         if (s.booked_by) {
           const st = getStudentById(s.booked_by);
           let span = 1;
@@ -4862,14 +4869,16 @@ async function handleExerciseVideoUpload(event, idx) {
             startTime: s.time,
             endTime: endStr,
             student: st,
-            durationLabel: formatDurationLabel(durMins)
+            durationLabel: formatDurationLabel(durMins),
+            isPast
           });
           i += span;
         } else {
           renderedRows.push({
             type: 'slot',
             time: s.time,
-            is_open: s.is_open
+            is_open: s.is_open,
+            isPast
           });
           i++;
         }
