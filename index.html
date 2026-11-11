@@ -453,7 +453,17 @@
           medical_notes: st.medical_notes || '',
           trainer_private_notes: st.trainer_private_notes || '',
           notification_settings: st.notification_settings || { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
-          workouts: Array.isArray(st.workouts) ? st.workouts : [],
+          workouts: (Array.isArray(st.workouts) ? st.workouts : []).map(w => {
+            // Если в существующем массиве уже был комментарий или статус от тренера — сохраняем его железно
+            return {
+              ...w,
+              trainer_comment: w.trainer_comment || w.trainer_feedback || '',
+              trainer_feedback: w.trainer_feedback || w.trainer_comment || '',
+              status: (w.trainer_comment || w.trainer_feedback || w.status === 'reviewed' || w.checked) ? 'reviewed' : (w.status || 'pending'),
+              reviewed: Boolean(w.trainer_comment || w.trainer_feedback || w.reviewed || w.checked),
+              checked: Boolean(w.trainer_comment || w.trainer_feedback || w.checked || w.reviewed)
+            };
+          }),
           anthropometry: Array.isArray(st.anthropometry) ? st.anthropometry : [],
           checkups: Array.isArray(st.checkups) ? st.checkups : [],
           inbody: Array.isArray(st.inbody) ? st.inbody : [],
@@ -3895,7 +3905,16 @@ async function handleExerciseVideoUpload(event, idx) {
         seg_left_leg: readFloat('inbody-seg-ll'),
         seg_right_leg: readFloat('inbody-seg-rl')
       });
-
+// Защищаем тренировки от сброса статуса проверки перед отправкой InBody в базу
+      if (Array.isArray(student.workouts)) {
+        student.workouts.forEach(w => {
+          if (w.trainer_comment || w.trainer_feedback || w.status === 'reviewed') {
+            w.status = 'reviewed';
+            w.reviewed = true;
+            w.checked = true;
+          }
+        });
+      }
       student.inbody.push(record);
       await waitForSupabaseClient();
       if (supabaseClient) {
@@ -4105,6 +4124,7 @@ async function handleExerciseVideoUpload(event, idx) {
           }
         }
 
+        
         await persistStudentToSupabase(student);
         triggerHaptic('success');
         showToast(`Фото «${uiState.pendingPhotoSlotTitle}» сжато (JPEG 0.75) и сохранено в облаке!`);
