@@ -86,15 +86,29 @@
       return cleanTg;
     }
 
-    function toValidNumericIdOrNull(rawId) {
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    let currentCoachId = null;
+
+    function toValidUuidOrNull(rawId) {
       if (rawId === null || rawId === undefined || rawId === '') return null;
       const str = String(rawId).trim();
-      if (str.startsWith('step-') || str.startsWith('bk-') || str.startsWith('w-')) return null;
-      const num = Number(str);
-      return Number.isInteger(num) && num > 0 ? num : null;
+      if (!str || str === 'null' || str === 'undefined') return null;
+      if (str.startsWith('step-') || str.startsWith('bk-') || str.startsWith('w-') || str.startsWith('local_')) return null;
+      if (UUID_REGEX.test(str)) return str;
+      return str.length >= 8 ? str : null;
     }
 
-    async function persistScheduleSlotsToSupabase() {
+    function toValidNumericIdOrNull(rawId) {
+      return toValidUuidOrNull(rawId);
+    }
+
+    function getCoachUuid() {
+      const fromTrainer = typeof appData !== 'undefined' && appData && appData.trainer_profile && appData.trainer_profile.supabase_id;
+      const fromCurrent = currentUser && (currentUser.role === 'coach' || currentUser.role === 'trainer') ? currentUser.id : null;
+      return toValidUuidOrNull(fromTrainer || fromCurrent || currentCoachId);
+    }
+
+    async function persistScheduleSlotsToSupabase(targetIsoDate = null) {
       await waitForSupabaseClient();
       if (!supabaseClient || !appData || !appData.schedule_slots) return false;
       try {
@@ -108,7 +122,7 @@
             booked_by: s.booked_by || null
           }));
         });
-        const safeNumericStudentId = toValidNumericIdOrNull(currentUser && currentUser.id);
+        const safeUserUuid = toValidUuidOrNull((currentUser && currentUser.id) || getCoachUuid());
         const schedulePayload = JSON.stringify(compactSchedule);
 
         const { data: existingRows } = await supabaseClient
@@ -116,13 +130,14 @@
           .select('id')
           .eq('type', 'schedule_meta')
           .eq('student_code', 'TRAINER_SCHEDULE')
+          .order('id', { ascending: false })
           .limit(1);
 
         if (Array.isArray(existingRows) && existingRows.length > 0) {
           await supabaseClient
             .from('student_reports')
             .update({
-              student_id: safeNumericStudentId,
+              student_id: safeUserUuid,
               photo_file_id: schedulePayload,
               telegram_msg_id: 0
             })
@@ -131,7 +146,7 @@
           await supabaseClient
             .from('student_reports')
             .insert([{
-              student_id: safeNumericStudentId,
+              student_id: safeUserUuid,
               student_code: 'TRAINER_SCHEDULE',
               type: 'schedule_meta',
               photo_file_id: schedulePayload,
@@ -139,6 +154,61 @@
               created_at: new Date().toISOString()
             }]);
         }
+
+        // Синхронизация с таблицей schedule_slots
+        try {
+          const coachUuid = getCoachUuid();
+          const datesToSync = targetIsoDate
+            ? [targetIsoDate]
+            : (typeof uiState !== 'undefined' && uiState.selectedTrainerScheduleDate ? [uiState.selectedTrainerScheduleDate] : Object.keys(appData.schedule_slots).slice(0, 3));
+
+          for (const isoDate of datesToSync) {
+            const daySlots = appData.schedule_slots[isoDate];
+            if (!Array.isArray(daySlots) || daySlots.length === 0) continue;
+
+            const slotRowsIso = daySlots.map(s => {
+              const startH = parseInt(String(s.time || '09:00').split(':')[0], 10) || 9;
+              const endH = startH + Math.ceil((Number(s.duration) || 60) / 60);
+              const endTimeStr = `${String(endH).padStart(2, '0')}:00`;
+              const row = {
+                start_time: `${isoDate}T${s.time}:00`,
+                end_time: `${isoDate}T${endTimeStr}:00`,
+                is_available: Boolean(s.is_open && !s.booked_by)
+              };
+              if (coachUuid) row.coach_id = coachUuid;
+              return row;
+            });
+
+            await supabaseClient
+              .from('schedule_slots')
+              .delete()
+              .gte('start_time', `${isoDate}T00:00:00`)
+              .lte('start_time', `${isoDate}T23:59:59`);
+
+            const { error: slotInsErr } = await supabaseClient
+              .from('schedule_slots')
+              .insert(slotRowsIso);
+
+            if (slotInsErr) {
+              const slotRowsTime = daySlots.map(s => {
+                const startH = parseInt(String(s.time || '09:00').split(':')[0], 10) || 9;
+                const endH = startH + Math.ceil((Number(s.duration) || 60) / 60);
+                const endTimeStr = `${String(endH).padStart(2, '0')}:00`;
+                const row = {
+                  start_time: s.time,
+                  end_time: endTimeStr,
+                  is_available: Boolean(s.is_open && !s.booked_by)
+                };
+                if (coachUuid) row.coach_id = coachUuid;
+                return row;
+              });
+              await supabaseClient.from('schedule_slots').insert(slotRowsTime);
+            }
+          }
+        } catch (slotSyncErr) {
+          console.warn('Предупреждение синхронизации schedule_slots:', slotSyncErr);
+        }
+
         return true;
       } catch (err) {
         console.warn('Не удалось сохранить слоты расписания в облако:', err);
@@ -162,8 +232,9 @@
         const cleanTg = String(st.telegram_username || '').trim().replace(/^@/, '');
         const cleanCode = String(st.access_code || '').trim().toUpperCase();
         const encodedUsername = buildEncodedUsername(cleanCode, cleanTg);
+        const coachUuid = getCoachUuid();
 
-        let targetUserId = toValidNumericIdOrNull(st.supabase_id || st.id);
+        let targetUserId = toValidUuidOrNull(st.supabase_id || st.id);
 
         if (!targetUserId && cleanCode) {
           const { data: existingByCode, error: findUserErr } = await supabaseClient
@@ -171,7 +242,6 @@
             .select('id')
             .eq('role', 'student')
             .or(`username.eq.${cleanCode},username.ilike.${cleanCode}|%`)
-            .order('id', { ascending: false })
             .limit(1);
           if (findUserErr) {
             console.error('Ошибка поиска users в Supabase:', findUserErr);
@@ -179,21 +249,25 @@
             return false;
           }
           if (Array.isArray(existingByCode) && existingByCode.length > 0) {
-            targetUserId = existingByCode[0].id;
+            targetUserId = toValidUuidOrNull(existingByCode[0].id);
           }
         }
 
         if (!targetUserId) {
           const safeTgId = Number(st.telegram_id) || ((Date.now() % 1000000000) + Math.floor(Math.random() * 1000) + 1);
+          const insertUserPayload = {
+            telegram_id: safeTgId,
+            first_name: firstName,
+            last_name: lastName,
+            username: encodedUsername,
+            role: 'student',
+            avatar_url: st.avatar || 'АТ'
+          };
+          if (coachUuid) insertUserPayload.coach_id = coachUuid;
+
           const { data: createdUser, error: createErr } = await supabaseClient
             .from('users')
-            .insert([{
-              telegram_id: safeTgId,
-              first_name: firstName,
-              last_name: lastName,
-              username: encodedUsername,
-              role: 'student'
-            }])
+            .insert([insertUserPayload])
             .select()
             .single();
 
@@ -217,13 +291,17 @@
           if (appData.current_student_id === oldId) appData.current_student_id = targetUserId;
           if (uiState.selectedTrainerStudentId === oldId) uiState.selectedTrainerStudentId = targetUserId;
 
+          const updateUserPayload = {
+            first_name: firstName,
+            last_name: lastName,
+            username: encodedUsername,
+            avatar_url: st.avatar || 'АТ'
+          };
+          if (coachUuid) updateUserPayload.coach_id = coachUuid;
+
           const { error: userUpdErr } = await supabaseClient
             .from('users')
-            .update({
-              first_name: firstName,
-              last_name: lastName,
-              username: encodedUsername
-            })
+            .update(updateUserPayload)
             .eq('id', targetUserId);
 
           if (userUpdErr) {
@@ -235,7 +313,7 @@
 
         const totalSessions = Math.max(0, Number(st.subscription?.total_sessions ?? st.subscription?.total ?? st.total ?? 8));
         const rawUsed = Number(st.subscription?.used_sessions ?? st.subscription?.used ?? 0);
-        const usedSessions = isNaN(rawUsed) ? 0 : Math.max(0, rawUsed);
+        let usedSessions = isNaN(rawUsed) ? 0 : Math.max(0, rawUsed);
 
         let remainingSessions = Number(st.subscription?.remaining);
         if (isNaN(remainingSessions) || remainingSessions === null) {
@@ -243,6 +321,7 @@
         }
         if (remainingSessions < 0) remainingSessions = 0;
         if (totalSessions > 0 && remainingSessions > totalSessions) remainingSessions = totalSessions;
+        usedSessions = Math.max(0, totalSessions - remainingSessions);
 
         const durationMins = Number(st.session_duration) || 120;
         const billingDay = Math.min(28, Math.max(1, Number(st.subscription?.payment_day ?? st.subscription?.billing_day) || 1));
@@ -251,10 +330,13 @@
           ? st.subscription.robokassa_sum
           : (subscriptionPrice > 0 ? formatRublesFromNumber(subscriptionPrice) : '15 000 ₽');
         const robokassaUrl = st.subscription?.robokassa_url || '';
+        const isFrozen = Boolean((st.freeze_details && st.freeze_details.is_frozen) || st.status === 'frozen');
+        const subStatus = isFrozen ? 'frozen' : 'active';
+        st.status = subStatus;
 
         st.price = subscriptionPrice;
         st.subscription = {
-          id: st.subscription?.id || null,
+          id: toValidUuidOrNull(st.subscription?.id) || null,
           price: subscriptionPrice,
           total: totalSessions,
           total_sessions: totalSessions,
@@ -263,30 +345,29 @@
           remaining: remainingSessions,
           payment_day: billingDay,
           billing_day: billingDay,
+          status: subStatus,
           robokassa_sum: robokassaSum,
           robokassa_url: robokassaUrl
         };
 
-        const safeNumericTargetId = toValidNumericIdOrNull(targetUserId);
+        const safeTargetUuid = toValidUuidOrNull(targetUserId);
 
-        if (safeNumericTargetId) {
+        if (safeTargetUuid) {
           const coreSubPayload = {
-            student_id: safeNumericTargetId,
+            student_id: safeTargetUuid,
             total_sessions: Number(totalSessions) || 0,
             used_sessions: Number(usedSessions) || 0,
             session_duration_minutes: Number(durationMins) || 60,
             billing_day: Number(billingDay) || 1,
-            status: 'active'
+            status: subStatus
           };
 
-          let subId = toValidNumericIdOrNull(st.subscription.id);
+          let subId = toValidUuidOrNull(st.subscription.id);
           if (!subId) {
             const { data: existingSubs, error: selSubErr } = await supabaseClient
               .from('subscriptions')
               .select('id')
-              .eq('student_id', safeNumericTargetId)
-              .eq('status', 'active')
-              .order('id', { ascending: false })
+              .eq('student_id', safeTargetUuid)
               .limit(1);
             if (selSubErr) {
               console.error('Ошибка чтения subscriptions:', selSubErr);
@@ -294,7 +375,7 @@
               return false;
             }
             if (existingSubs && existingSubs.length > 0) {
-              subId = existingSubs[0].id;
+              subId = toValidUuidOrNull(existingSubs[0].id);
               st.subscription.id = subId;
             }
           }
@@ -350,10 +431,10 @@
           telegram_username: cleanTg,
           full_name: fullName,
           avatar: st.avatar || 'АТ',
-          status: st.status || 'active',
+          status: subStatus,
           price: subscriptionPrice,
           session_duration: Number(durationMins) || 60,
-          freeze_details: st.freeze_details || { is_frozen: false, from: '2026-11-01', to: '2026-11-15' },
+          freeze_details: st.freeze_details || { is_frozen: isFrozen, from: '2026-11-01', to: '2026-11-15' },
           subscription: {
             id: st.subscription.id || null,
             price: subscriptionPrice,
@@ -364,6 +445,7 @@
             remaining: Number(remainingSessions) || 0,
             payment_day: Number(billingDay) || 1,
             billing_day: Number(billingDay) || 1,
+            status: subStatus,
             robokassa_sum: robokassaSum,
             robokassa_url: robokassaUrl
           },
@@ -388,6 +470,7 @@
             .select('id')
             .eq('type', 'profile_meta')
             .eq('student_code', cleanCode)
+            .order('id', { ascending: false })
             .limit(1);
           if (selRepErr) {
             console.error('Ошибка поиска student_reports:', selRepErr);
@@ -396,12 +479,13 @@
           }
           if (Array.isArray(data) && data.length > 0) existingReport = data[0];
         }
-        if (!existingReport && safeNumericTargetId) {
+        if (!existingReport && safeTargetUuid) {
           const { data, error: selRepByIdErr } = await supabaseClient
             .from('student_reports')
             .select('id')
             .eq('type', 'profile_meta')
-            .eq('student_id', safeNumericTargetId)
+            .eq('student_id', safeTargetUuid)
+            .order('id', { ascending: false })
             .limit(1);
           if (selRepByIdErr) {
             console.error('Ошибка поиска student_reports по id:', selRepByIdErr);
@@ -415,7 +499,7 @@
           const { error: updErr } = await supabaseClient
             .from('student_reports')
             .update({
-              student_id: safeNumericTargetId,
+              student_id: safeTargetUuid,
               student_code: cleanCode || 'N/A',
               photo_file_id: jsonSnapshot,
               telegram_msg_id: 0
@@ -430,7 +514,7 @@
           const { error: insErr } = await supabaseClient
             .from('student_reports')
             .insert([{
-              student_id: safeNumericTargetId,
+              student_id: safeTargetUuid,
               student_code: cleanCode || 'N/A',
               type: 'profile_meta',
               photo_file_id: jsonSnapshot,
@@ -497,17 +581,17 @@
       const metaSub = (profileMeta && profileMeta.subscription) ? profileMeta.subscription : null;
       if (sub || metaSub) {
         if (sub) currentSubscription = sub;
+        const subTotal = sub && sub.total_sessions !== undefined ? Number(sub.total_sessions) : NaN;
         const metaTotal = metaSub ? Number(metaSub.total ?? metaSub.total_sessions) : NaN;
-        const subTotal = sub ? Number(sub.total_sessions) : NaN;
-        const total = Math.max(0, (!isNaN(metaTotal) && (metaTotal > 0 || !subTotal)) ? metaTotal : (Number(sub?.total_sessions ?? student.subscription?.total ?? 0) || 0));
+        const total = Math.max(0, (!isNaN(subTotal) && subTotal > 0) ? subTotal : (!isNaN(metaTotal) ? metaTotal : (Number(student.subscription?.total ?? 8) || 8)));
 
+        const subUsed = sub && sub.used_sessions !== undefined ? Number(sub.used_sessions) : NaN;
         const metaUsed = metaSub ? Number(metaSub.used ?? metaSub.used_sessions) : NaN;
-        const subUsed = sub ? Number(sub.used_sessions) : NaN;
-        const used = Math.min(total, Math.max(0, (!isNaN(metaUsed) && (metaUsed > 0 || !subUsed)) ? metaUsed : (Number(sub?.used_sessions ?? student.subscription?.used ?? 0) || 0)));
+        const used = Math.min(total, Math.max(0, !isNaN(subUsed) ? subUsed : (!isNaN(metaUsed) ? metaUsed : (Number(student.subscription?.used ?? 0) || 0))));
 
         const remaining = Math.max(0, total - used);
-        const dur = Number(profileMeta?.session_duration ?? sub?.session_duration_minutes ?? student.session_duration) || 60;
-        const billDay = Math.min(28, Math.max(1, Number(metaSub?.payment_day ?? metaSub?.billing_day ?? sub?.billing_day ?? student.subscription?.payment_day) || 1));
+        const dur = Number(sub?.session_duration_minutes ?? profileMeta?.session_duration ?? student.session_duration) || 60;
+        const billDay = Math.min(28, Math.max(1, Number(sub?.billing_day ?? metaSub?.payment_day ?? metaSub?.billing_day ?? student.subscription?.payment_day) || 1));
 
         student.session_duration = dur;
         if (!student.subscription) student.subscription = {};
@@ -519,6 +603,7 @@
         student.subscription.remaining = remaining;
         student.subscription.payment_day = billDay;
         student.subscription.billing_day = billDay;
+        student.subscription.status = sub?.status || metaSub?.status || 'active';
 
         const resolvedSum = metaSub?.robokassa_sum ?? sub?.robokassa_sum ?? student.subscription.robokassa_sum ?? '0 ₽';
         const resolvedUrl = metaSub?.robokassa_url ?? sub?.robokassa_url ?? student.subscription.robokassa_url ?? '';
@@ -529,7 +614,7 @@
       if (profileMeta) {
         if (profileMeta.freeze_details) {
           student.freeze_details = profileMeta.freeze_details;
-          student.status = profileMeta.freeze_details.is_frozen ? 'frozen' : 'active';
+          student.status = (profileMeta.freeze_details.is_frozen || (sub && sub.status === 'frozen')) ? 'frozen' : 'active';
         }
         if (profileMeta.medical_notes !== undefined) student.medical_notes = profileMeta.medical_notes;
         if (profileMeta.trainer_private_notes !== undefined) student.trainer_private_notes = profileMeta.trainer_private_notes;
@@ -538,6 +623,11 @@
         if (Array.isArray(profileMeta.anthropometry)) student.anthropometry = profileMeta.anthropometry.map(normalizeAnthropometryRecord);
         if (Array.isArray(profileMeta.checkups)) student.checkups = profileMeta.checkups;
         if (Array.isArray(profileMeta.inbody)) student.inbody = profileMeta.inbody.map(enrichInBodyRecord);
+      }
+      if (sub && sub.status === 'frozen') {
+        if (!student.freeze_details) student.freeze_details = { is_frozen: true, from: '2026-11-01', to: '2026-11-15' };
+        student.freeze_details.is_frozen = true;
+        student.status = 'frozen';
       }
 
       if (Array.isArray(bookings)) {
@@ -588,19 +678,35 @@
         return;
       }
       try {
-        const [usersRes, subsRes, bksRes, reportsRes] = await Promise.allSettled([
-          supabaseClient.from('users').select('*').eq('role', 'student'),
-          supabaseClient.from('subscriptions').select('*').eq('status', 'active'),
+        const [usersRes, subsRes, bksRes, reportsRes, anthroRes, checkupsRes, slotsRes] = await Promise.allSettled([
+          supabaseClient.from('users').select('*'),
+          supabaseClient.from('subscriptions').select('*'),
           supabaseClient.from('bookings').select('*').eq('status', 'confirmed'),
-          supabaseClient.from('student_reports').select('*').in('type', ['profile_meta', 'schedule_meta'])
+          supabaseClient.from('student_reports').select('*').in('type', ['profile_meta', 'schedule_meta', 'weekly_photo', 'inbody_scan']),
+          supabaseClient.from('anthropometry_records').select('*').order('recorded_at', { ascending: true }),
+          supabaseClient.from('weekly_checkups').select('*').order('submitted_at', { ascending: true }),
+          supabaseClient.from('schedule_slots').select('*')
         ]);
 
-        const users = (usersRes.status === 'fulfilled' && usersRes.value && Array.isArray(usersRes.value.data)) ? usersRes.value.data : [];
+        const allUsers = (usersRes.status === 'fulfilled' && usersRes.value && Array.isArray(usersRes.value.data)) ? usersRes.value.data : [];
+        const coachUser = allUsers.find(u => u.role === 'coach' || u.role === 'trainer');
+        if (coachUser && coachUser.id) {
+          currentCoachId = coachUser.id;
+          if (appData && appData.trainer_profile) {
+            appData.trainer_profile.supabase_id = coachUser.id;
+          }
+        }
+        const users = allUsers.filter(u => !u.role || u.role === 'student');
         const subs = (subsRes.status === 'fulfilled' && subsRes.value && Array.isArray(subsRes.value.data)) ? subsRes.value.data : [];
         const bks = (bksRes.status === 'fulfilled' && bksRes.value && Array.isArray(bksRes.value.data)) ? bksRes.value.data : [];
         const reports = (reportsRes.status === 'fulfilled' && reportsRes.value && Array.isArray(reportsRes.value.data)) ? reportsRes.value.data : [];
+        const anthroRows = (anthroRes.status === 'fulfilled' && anthroRes.value && Array.isArray(anthroRes.value.data)) ? anthroRes.value.data : [];
+        const checkupRows = (checkupsRes.status === 'fulfilled' && checkupsRes.value && Array.isArray(checkupsRes.value.data)) ? checkupsRes.value.data : [];
+        const rawScheduleSlots = (slotsRes.status === 'fulfilled' && slotsRes.value && Array.isArray(slotsRes.value.data)) ? slotsRes.value.data : [];
 
-        const scheduleReports = reports.filter(r => r.type === 'schedule_meta' && r.student_code === 'TRAINER_SCHEDULE');
+        const scheduleReports = reports
+          .filter(r => r.type === 'schedule_meta' && r.student_code === 'TRAINER_SCHEDULE')
+          .sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
         const scheduleReport = scheduleReports.length > 0 ? scheduleReports[scheduleReports.length - 1] : null;
         if (scheduleReport && scheduleReport.photo_file_id) {
           try {
@@ -619,6 +725,21 @@
               });
             }
           } catch (e) {}
+        } else if (rawScheduleSlots.length > 0) {
+          rawScheduleSlots.forEach(row => {
+            const rawStart = String(row.start_time || '');
+            if (rawStart.includes('T')) {
+              const [dPart, tPart] = rawStart.split('T');
+              const hhmm = (tPart || '').slice(0, 5);
+              if (dPart && hhmm && appData.schedule_slots[dPart]) {
+                const slot = appData.schedule_slots[dPart].find(s => s.time === hhmm);
+                if (slot) {
+                  slot.is_open = Boolean(row.is_available);
+                  slot.baseline_closed = !Boolean(row.is_available);
+                }
+              }
+            }
+          });
         }
 
         if (appData.schedule_slots) {
@@ -631,38 +752,99 @@
 
         const subsMap = new Map();
         subs.forEach(s => {
-          const prev = subsMap.get(s.student_id);
-          if (!prev || Number(s.id) > Number(prev.id)) {
-            subsMap.set(s.student_id, s);
-          }
+          if (!s.student_id) return;
+          const key = String(s.student_id);
+          subsMap.set(key, s);
         });
 
         const todayIsoNow = formatISO(getTodayDateObj());
         const bksMap = new Map();
         bks.forEach(b => {
+          if (!b.student_id) return;
           if (b.session_date && b.session_date < todayIsoNow) return;
-          if (!bksMap.has(b.student_id)) bksMap.set(b.student_id, []);
-          bksMap.get(b.student_id).push(b);
+          const key = String(b.student_id);
+          if (!bksMap.has(key)) bksMap.set(key, []);
+          bksMap.get(key).push(b);
         });
+
+        const anthroMap = new Map();
+        anthroRows.forEach(r => {
+          if (!r.student_id) return;
+          const key = String(r.student_id);
+          if (!anthroMap.has(key)) anthroMap.set(key, []);
+          const rawDate = String(r.recorded_at || r.created_at || '').slice(0, 10);
+          const dateFormatted = rawDate.includes('-') ? formatDotDate(rawDate) : (rawDate || formatDotDate(todayIsoNow));
+          anthroMap.get(key).push(normalizeAnthropometryRecord({
+            id: r.id,
+            date: dateFormatted,
+            chest: Number(r.chest ?? 0),
+            waist: Number(r.waist ?? 0),
+            arms: Number(r.arms ?? r.biceps ?? 0)
+          }));
+        });
+
+        const checkupsMap = new Map();
+        checkupRows.forEach(c => {
+          if (!c.student_id) return;
+          const key = String(c.student_id);
+          if (!checkupsMap.has(key)) checkupsMap.set(key, []);
+          let parsedExtra = null;
+          if (c.coach_feedback && String(c.coach_feedback).trim().startsWith('{')) {
+            try { parsedExtra = JSON.parse(c.coach_feedback); } catch (e) {}
+          }
+          const rawDate = String(c.week_start_date || c.submitted_at || '').slice(0, 10);
+          const dateFormatted = (parsedExtra && parsedExtra.date) ? parsedExtra.date : (rawDate.includes('-') ? formatDotDate(rawDate) : (rawDate || formatDotDate(todayIsoNow)));
+          checkupsMap.get(key).push({
+            id: c.id,
+            date: dateFormatted,
+            fasting_weight: Number(parsedExtra?.fasting_weight ?? 0),
+            workouts_done: Number(parsedExtra?.workouts_done ?? 0),
+            weights_growth: parsedExtra?.weights_growth ?? '',
+            sleep: Number(c.sleep_quality ?? parsedExtra?.sleep ?? 8),
+            appetite: Number(parsedExtra?.appetite ?? 8),
+            diet: Number(c.diet_adherence ?? parsedExtra?.diet ?? 8),
+            digestion: Number(c.stress_level ?? parsedExtra?.digestion ?? 8),
+            comment: parsedExtra?.comment ?? c.recovery_notes ?? ''
+          });
+        });
+
+        const inbodyReportsMap = new Map();
+        reports
+          .filter(r => r.type === 'inbody_scan')
+          .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))
+          .forEach(r => {
+            if (!r.photo_file_id || !String(r.photo_file_id).trim().startsWith('{')) return;
+            try {
+              const parsedScan = enrichInBodyRecord(JSON.parse(r.photo_file_id));
+              if (r.student_id) {
+                const k = String(r.student_id);
+                if (!inbodyReportsMap.has(k)) inbodyReportsMap.set(k, []);
+                inbodyReportsMap.get(k).push(parsedScan);
+              }
+            } catch (e) {}
+          });
 
         const metaMap = new Map();
         const profileMetaRecords = [];
-        reports.filter(r => r.type === 'profile_meta').forEach(r => {
-          try {
-            const parsed = JSON.parse(r.photo_file_id || '{}');
-            const codeFromRow = String(r.student_code || parsed.access_code || '').trim().toUpperCase();
-            const cleanCode = (codeFromRow && codeFromRow !== 'N/A') ? codeFromRow : '';
-            if (cleanCode && !parsed.access_code) parsed.access_code = cleanCode;
-            if (r.student_id) metaMap.set(String(r.student_id), parsed);
-            if (cleanCode) metaMap.set(cleanCode, parsed);
-            profileMetaRecords.push({
-              report: r,
-              meta: parsed,
-              code: cleanCode,
-              student_id: r.student_id
-            });
-          } catch (e) {}
-        });
+        reports
+          .filter(r => r.type === 'profile_meta')
+          .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))
+          .forEach(r => {
+            try {
+              const parsed = JSON.parse(r.photo_file_id || '{}');
+              const codeFromRow = String(r.student_code || parsed.access_code || '').trim().toUpperCase();
+              const cleanCode = (codeFromRow && codeFromRow !== 'N/A') ? codeFromRow : '';
+              if (cleanCode && !parsed.access_code) parsed.access_code = cleanCode;
+              if (r.student_id) metaMap.set(String(r.student_id), parsed);
+              if (cleanCode) metaMap.set(cleanCode, parsed);
+              profileMetaRecords.push({
+                report: r,
+                meta: parsed,
+                code: cleanCode,
+                student_id: r.student_id
+              });
+            } catch (e) {}
+          });
 
         const existingMap = new Map();
         (appData.students || []).forEach(s => {
@@ -672,7 +854,7 @@
 
         const combinedCandidates = [...users];
 
-        // Единый источник истины — строго данные из Supabase (users + student_reports)
+        // Единый источник истины — строго данные из Supabase (users + subscriptions + bookings + student_reports + anthropometry_records + weekly_checkups)
 
         const deduplicatedUsers = [];
         const seenKeys = new Set();
@@ -690,21 +872,22 @@
         const freshStudents = [];
 
         deduplicatedUsers.forEach(u => {
+          const userIdStr = String(u.id);
           const parsedInfo = parseUsernameAndCode(u.username, u.access_code);
-          const meta = metaMap.get(String(u.id)) || (parsedInfo.access_code ? metaMap.get(parsedInfo.access_code) : null) || {};
-          const prevSt = existingMap.get(String(u.id)) || (parsedInfo.access_code ? existingMap.get(parsedInfo.access_code) : null) || null;
+          const meta = metaMap.get(userIdStr) || (parsedInfo.access_code ? metaMap.get(parsedInfo.access_code) : null) || {};
+          const prevSt = existingMap.get(userIdStr) || (parsedInfo.access_code ? existingMap.get(parsedInfo.access_code) : null) || null;
 
-          const userFullName = meta.full_name || `${u.first_name || ''} ${u.last_name || ''}`.trim() || prevSt?.full_name || 'Атлет';
-          const userSub = subsMap.get(u.id);
-          const userBks = bksMap.get(u.id) || [];
+          const userFullName = `${u.first_name || ''} ${u.last_name || ''}`.trim() || meta.full_name || prevSt?.full_name || 'Атлет';
+          const userSub = subsMap.get(userIdStr);
+          const userBks = bksMap.get(userIdStr) || [];
 
           const metaSub = meta.subscription || null;
-          
+
           let total = 8;
-          if (metaSub && Number(metaSub.total ?? metaSub.total_sessions) > 0) {
-            total = Number(metaSub.total ?? metaSub.total_sessions);
-          } else if (userSub && Number(userSub.total_sessions) > 0) {
+          if (userSub && userSub.total_sessions !== undefined && Number(userSub.total_sessions) > 0) {
             total = Number(userSub.total_sessions);
+          } else if (metaSub && Number(metaSub.total ?? metaSub.total_sessions) > 0) {
+            total = Number(metaSub.total ?? metaSub.total_sessions);
           } else if (prevSt?.subscription && Number(prevSt.subscription.total) > 0) {
             total = Number(prevSt.subscription.total);
           }
@@ -718,17 +901,15 @@
             used = Number(prevSt.subscription.used ?? 0);
           }
 
-          let remaining = total - used;
-          if (metaSub && metaSub.remaining !== undefined && !isNaN(Number(metaSub.remaining))) {
+          let remaining = Math.max(0, total - used);
+          if (!userSub && metaSub && metaSub.remaining !== undefined && !isNaN(Number(metaSub.remaining))) {
             remaining = Number(metaSub.remaining);
-          } else if (prevSt?.subscription?.remaining !== undefined) {
-            remaining = Number(prevSt.subscription.remaining);
           }
           if (remaining < 0) remaining = 0;
           if (remaining > total) remaining = total;
 
-          const dur = Number(meta?.session_duration ?? userSub?.session_duration_minutes ?? prevSt?.session_duration) || 120;
-          const billDay = Math.min(28, Math.max(1, Number(metaSub?.payment_day ?? metaSub?.billing_day ?? userSub?.billing_day ?? prevSt?.subscription?.payment_day) || 1));
+          const dur = Number(userSub?.session_duration_minutes ?? meta?.session_duration ?? prevSt?.session_duration) || 120;
+          const billDay = Math.min(28, Math.max(1, Number(userSub?.billing_day ?? metaSub?.payment_day ?? metaSub?.billing_day ?? prevSt?.subscription?.payment_day) || 1));
 
           const rawPrice = Number(meta?.price ?? metaSub?.price ?? prevSt?.price ?? 15000);
           const rawSum = metaSub?.robokassa_sum ?? prevSt?.subscription?.robokassa_sum ?? formatRublesFromNumber(rawPrice);
@@ -773,17 +954,47 @@
             };
           }).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
 
-          const freezeDetails = u.freeze_details || meta.freeze_details || prevSt?.freeze_details || { is_frozen: false, from: '2026-11-01', to: '2026-11-15' };
+          const baseFreeze = u.freeze_details || meta.freeze_details || prevSt?.freeze_details || { is_frozen: false, from: '2026-11-01', to: '2026-11-15' };
+          const isSubFrozen = userSub && userSub.status === 'frozen';
+          const freezeDetails = {
+            ...baseFreeze,
+            is_frozen: isSubFrozen ? true : Boolean(baseFreeze.is_frozen)
+          };
+
+          const metaAnthro = (Array.isArray(u.anthropometry) ? u.anthropometry : (Array.isArray(meta.anthropometry) ? meta.anthropometry : (Array.isArray(prevSt?.anthropometry) ? prevSt.anthropometry : []))).map(normalizeAnthropometryRecord);
+          const tableAnthro = anthroMap.get(userIdStr) || [];
+          const mergedAnthro = [...metaAnthro];
+          tableAnthro.forEach(ta => {
+            const exists = mergedAnthro.some(ma => ma.date === ta.date && Number(ma.chest) === Number(ta.chest) && Number(ma.waist) === Number(ta.waist) && Number(ma.arms) === Number(ta.arms));
+            if (!exists) mergedAnthro.push(ta);
+          });
+
+          const metaCheckups = Array.isArray(u.checkups) ? u.checkups : (Array.isArray(meta.checkups) ? meta.checkups : (Array.isArray(prevSt?.checkups) ? prevSt.checkups : []));
+          const tableCheckups = checkupsMap.get(userIdStr) || [];
+          const mergedCheckups = [...metaCheckups];
+          tableCheckups.forEach(tc => {
+            const exists = mergedCheckups.some(mc => (mc.id && tc.id && String(mc.id) === String(tc.id)) || (mc.date === tc.date && Number(mc.fasting_weight) === Number(tc.fasting_weight) && String(mc.comment || '') === String(tc.comment || '')));
+            if (!exists) mergedCheckups.push(tc);
+          });
+
+          const metaInbody = (Array.isArray(u.inbody) ? u.inbody : (Array.isArray(meta.inbody) ? meta.inbody : (Array.isArray(prevSt?.inbody) ? prevSt.inbody : []))).map(enrichInBodyRecord);
+          const tableInbody = inbodyReportsMap.get(userIdStr) || [];
+          const mergedInbody = [...metaInbody];
+          tableInbody.forEach(ti => {
+            const exists = mergedInbody.some(mi => mi.date === ti.date && Number(mi.weight) === Number(ti.weight) && Number(mi.muscle_mass) === Number(ti.muscle_mass));
+            if (!exists) mergedInbody.push(ti);
+          });
 
           const resolvedPrice = Number(meta?.price ?? metaSub?.price ?? prevSt?.price ?? prevSt?.subscription?.price ?? parseNumericRubles(cleanSumStr)) || 0;
           freshStudents.push({
             id: u.id,
             supabase_id: u.id,
+            coach_id: u.coach_id || currentCoachId || null,
             telegram_id: u.telegram_id || null,
             access_code: code,
             telegram_username: tgUsername,
             full_name: userFullName,
-            avatar: meta.avatar || prevSt?.avatar || initials,
+            avatar: u.avatar_url || meta.avatar || prevSt?.avatar || initials,
             status: freezeDetails.is_frozen ? 'frozen' : 'active',
             freeze_details: freezeDetails,
             price: resolvedPrice,
@@ -798,6 +1009,7 @@
               remaining: remaining,
               payment_day: billDay,
               billing_day: billDay,
+              status: freezeDetails.is_frozen ? 'frozen' : 'active',
               robokassa_sum: cleanSumStr,
               robokassa_url: cleanUrlStr
             },
@@ -806,9 +1018,9 @@
             trainer_private_notes: u.trainer_private_notes ?? meta.trainer_private_notes ?? prevSt?.trainer_private_notes ?? '',
             notification_settings: u.notification_settings || meta.notification_settings || prevSt?.notification_settings || { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
             workouts: Array.isArray(u.workouts) ? u.workouts : (Array.isArray(meta.workouts) ? meta.workouts : (Array.isArray(prevSt?.workouts) ? prevSt.workouts : [])),
-            anthropometry: (Array.isArray(u.anthropometry) ? u.anthropometry : (Array.isArray(meta.anthropometry) ? meta.anthropometry : (Array.isArray(prevSt?.anthropometry) ? prevSt.anthropometry : []))).map(normalizeAnthropometryRecord),
-            checkups: Array.isArray(u.checkups) ? u.checkups : (Array.isArray(meta.checkups) ? meta.checkups : (Array.isArray(prevSt?.checkups) ? prevSt.checkups : [])),
-            inbody: (Array.isArray(u.inbody) ? u.inbody : (Array.isArray(meta.inbody) ? meta.inbody : (Array.isArray(prevSt?.inbody) ? prevSt.inbody : []))).map(enrichInBodyRecord),
+            anthropometry: mergedAnthro,
+            checkups: mergedCheckups,
+            inbody: mergedInbody,
             photo_reports: Array.isArray(u.photo_reports) && u.photo_reports.length > 0
               ? u.photo_reports
               : (Array.isArray(meta.photo_reports) && meta.photo_reports.length > 0
@@ -862,11 +1074,12 @@
         }
 
         let user = null;
-        if (preferredStudent && preferredStudent.id && !String(preferredStudent.id).startsWith('step-')) {
+        const candidateUuid = toValidUuidOrNull(preferredStudent && (preferredStudent.supabase_id || preferredStudent.id));
+        if (candidateUuid) {
           const { data: byId } = await supabaseClient
             .from('users')
             .select('*')
-            .eq('id', preferredStudent.id)
+            .eq('id', candidateUuid)
             .maybeSingle();
           if (byId) user = byId;
         }
@@ -900,11 +1113,12 @@
             try {
               resolvedProfileMeta = JSON.parse(rep.photo_file_id || '{}');
             } catch (e) {}
-            if (rep.student_id) {
+            const repStudentUuid = toValidUuidOrNull(rep.student_id);
+            if (repStudentUuid) {
               const { data: byRepUserId } = await supabaseClient
                 .from('users')
                 .select('*')
-                .eq('id', rep.student_id)
+                .eq('id', repStudentUuid)
                 .maybeSingle();
               if (byRepUserId) user = byRepUserId;
             }
@@ -943,8 +1157,6 @@
           .from('subscriptions')
           .select('*')
           .eq('student_id', user.id)
-          .eq('status', 'active')
-          .order('id', { ascending: false })
           .limit(1);
 
         let sub = (subsList && subsList.length > 0) ? subsList[0] : null;
@@ -955,7 +1167,7 @@
               .from('subscriptions')
               .insert([{
                 student_id: user.id,
-                total_sessions: Number(resolvedProfileMeta?.subscription?.total ?? preferredStudent?.subscription?.total ?? 0) || 0,
+                total_sessions: Number(resolvedProfileMeta?.subscription?.total ?? preferredStudent?.subscription?.total ?? 8) || 8,
                 used_sessions: Number(resolvedProfileMeta?.subscription?.used ?? preferredStudent?.subscription?.used ?? 0) || 0,
                 session_duration_minutes: Number(resolvedProfileMeta?.session_duration ?? preferredStudent?.session_duration) || 60,
                 billing_day: Number(resolvedProfileMeta?.subscription?.payment_day ?? preferredStudent?.subscription?.payment_day) || 1,
@@ -1000,80 +1212,88 @@
         }
 
         const currentSt = typeof getCurrentStudent === 'function' ? getCurrentStudent() : null;
-        let userId = (currentSt && (currentSt.supabase_id || currentSt.id)) || (currentUser && currentUser.id);
+        let userId = toValidUuidOrNull((currentSt && (currentSt.supabase_id || currentSt.id)) || (currentUser && currentUser.id));
 
-        if (!userId || String(userId).startsWith('step-')) {
+        if (!userId) {
           const authRes = await getOrCreateSupabaseUser('student', { autoEnter: true, student: currentSt });
-          userId = authRes && authRes.user ? authRes.user.id : null;
+          userId = authRes && authRes.user ? toValidUuidOrNull(authRes.user.id) : null;
         }
 
         if (!userId) {
-          notifyUser('Не удалось определить профиль ученика в базе данных.', 'error');
+          notifyUser('Не удалось определить UUID профиля ученика в базе данных.', 'error');
           return null;
         }
 
         let { data: subsList, error: subError } = await supabaseClient
-            .from('subscriptions')
-            .select('*')
-            .eq('student_id', userId)
-            .order('id', { ascending: false })
-            .limit(1);
+          .from('subscriptions')
+          .select('*')
+          .eq('student_id', userId)
+          .limit(1);
 
-          if (subError) throw subError;
+        if (subError) throw subError;
 
-          let sub = (subsList && subsList.length > 0) ? subsList[0] : null;
+        let sub = (subsList && subsList.length > 0) ? subsList[0] : null;
 
-          const totalSessions = Math.max(0, Number(sub?.total_sessions ?? currentSt?.subscription?.total ?? 0));
-          const usedSessions = Math.max(0, Number(sub?.used_sessions ?? currentSt?.subscription?.used ?? 0));
-          let remainingSessions = Number(sub?.remaining ?? currentSt?.subscription?.remaining);
-          if (isNaN(remainingSessions)) {
-            remainingSessions = Math.max(0, totalSessions - usedSessions);
-          }
+        const totalSessions = Math.max(0, Number(sub?.total_sessions ?? currentSt?.subscription?.total ?? 0));
+        const usedSessions = Math.max(0, Number(sub?.used_sessions ?? currentSt?.subscription?.used ?? 0));
+        const remainingSessions = Math.max(0, totalSessions - usedSessions);
 
-          // Проверяем остаток: сначала по объекту из базы, затем по текущему профилю ученика
-          const effectiveRemaining = (remainingSessions > 0) 
-            ? remainingSessions 
-            : Number(currentSt?.subscription?.remaining ?? 0);
+        const effectiveRemaining = (remainingSessions > 0)
+          ? remainingSessions
+          : Number(currentSt?.subscription?.remaining ?? 0);
 
-          if (effectiveRemaining <= 0) {
-            notifyUser('Закончились тренировки в абонементе! Обратитесь к тренеру.', 'error');
-            return null;
-          }
+        if (effectiveRemaining <= 0) {
+          notifyUser('Закончились тренировки в абонементе! Обратитесь к тренеру.', 'error');
+          return null;
+        }
 
         const durationMinutes = Number(sub?.session_duration_minutes ?? currentSt?.session_duration ?? 60);
+        const coachUuid = toValidUuidOrNull(currentSt?.coach_id || getCoachUuid());
+        const bookingInsertPayload = {
+          student_id: userId,
+          session_date: date,
+          session_time: time,
+          duration_minutes: durationMinutes,
+          status: 'confirmed'
+        };
+        if (coachUuid) bookingInsertPayload.coach_id = coachUuid;
 
         const { data: insertedBookings, error: bookError } = await supabaseClient
           .from('bookings')
-          .insert([{
-            student_id: userId,
-            session_date: date,
-            session_time: time,
-            duration_minutes: durationMinutes,
-            status: 'confirmed'
-          }])
+          .insert([bookingInsertPayload])
           .select();
 
         if (bookError) throw bookError;
         const createdBooking = (insertedBookings && insertedBookings.length > 0) ? insertedBookings[0] : null;
 
         const newUsedSessions = usedSessions + 1;
-          let updatedSub = sub ? { ...sub, used_sessions: newUsedSessions } : null;
+        let updatedSub = sub ? { ...sub, used_sessions: newUsedSessions } : null;
 
-          if (sub?.id) {
-            const { data: updatedSubs, error: updateError } = await supabaseClient
-              .from('subscriptions')
-              .update({ used_sessions: newUsedSessions })
-              .eq('id', sub.id)
-              .select();
+        if (sub?.id) {
+          const { data: updatedSubs, error: updateError } = await supabaseClient
+            .from('subscriptions')
+            .update({ used_sessions: newUsedSessions })
+            .eq('id', sub.id)
+            .select();
 
-            if (updateError) console.warn('Не удалось обновить subscriptions:', updateError);
-            if (updatedSubs && updatedSubs.length > 0) {
-              updatedSub = updatedSubs[0];
-            }
+          if (updateError) console.warn('Не удалось обновить subscriptions:', updateError);
+          if (updatedSubs && updatedSubs.length > 0) {
+            updatedSub = updatedSubs[0];
           }
+        } else {
+          const { data: updatedSubs } = await supabaseClient
+            .from('subscriptions')
+            .update({ used_sessions: newUsedSessions })
+            .eq('student_id', userId)
+            .select();
+          if (updatedSubs && updatedSubs.length > 0) {
+            updatedSub = updatedSubs[0];
+          }
+        }
 
         currentSubscription = updatedSub;
         if (currentSt && currentSt.subscription) {
+          if (updatedSub && updatedSub.id) currentSt.subscription.id = updatedSub.id;
           currentSt.subscription.used = newUsedSessions;
           currentSt.subscription.used_sessions = newUsedSessions;
           currentSt.subscription.remaining = Math.max(0, totalSessions - newUsedSessions);
@@ -1742,7 +1962,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
       const studentName = currentStudent ? (currentStudent.full_name || currentStudent.name || 'Подопечный') : 'Подопечный';
       const studentCode = currentStudent ? (currentStudent.access_code || 'N/A') : 'N/A';
       const rawId = currentStudent ? (currentStudent.supabase_id || currentStudent.id) : appData.current_student_id;
-      const safeNumericStudentId = toValidNumericIdOrNull(rawId);
+      const safeNumericStudentId = toValidUuidOrNull(rawId);
 
       showToast('Сжимаем и загружаем фото в архив...', 'info');
 
@@ -2607,7 +2827,9 @@ function renderOnboardingScreen() {
             }
           }
 
-          // 3. Обновляем саму запись в массиве активных броней
+          // 3. Обновляем саму запись в массиве активных броней (сохранив прежние дату/время для поиска в БД)
+          const oldReschedDate = existingToReschedule.date;
+          const oldReschedTime = existingToReschedule.time;
           existingToReschedule.date = isoDate;
           existingToReschedule.time = startTime;
           existingToReschedule.duration = sessionDuration;
@@ -2617,11 +2839,12 @@ function renderOnboardingScreen() {
 
           // 4. Синхронизируем изменение в Supabase (БЕЗ списания used_sessions!)
           try {
-            ensureSupabaseClient();
+            await waitForSupabaseClient();
             if (supabaseClient) {
-              const targetStudentId = student.supabase_id || student.id || (currentUser && currentUser.id);
+              const targetStudentId = toValidUuidOrNull(student.supabase_id || student.id || (currentUser && currentUser.id));
+              const validBookingUuid = toValidUuidOrNull(existingToReschedule.id);
 
-              if (existingToReschedule.id && !String(existingToReschedule.id).startsWith('bk-')) {
+              if (validBookingUuid) {
                 await supabaseClient
                   .from('bookings')
                   .update({
@@ -2630,20 +2853,37 @@ function renderOnboardingScreen() {
                     duration_minutes: sessionDuration,
                     status: 'confirmed'
                   })
-                  .eq('id', existingToReschedule.id);
+                  .eq('id', validBookingUuid);
               } else if (targetStudentId) {
-                const { data: newBk } = await supabaseClient
+                const { data: updatedBySlot } = await supabaseClient
                   .from('bookings')
-                  .insert([{
-                    student_id: targetStudentId,
+                  .update({
                     session_date: isoDate,
                     session_time: startTime,
                     duration_minutes: sessionDuration,
                     status: 'confirmed'
-                  }])
+                  })
+                  .eq('student_id', targetStudentId)
+                  .eq('session_date', oldReschedDate)
+                  .eq('session_time', oldReschedTime)
                   .select();
-                if (newBk && newBk.length > 0) {
-                  existingToReschedule.id = newBk[0].id;
+
+                if (Array.isArray(updatedBySlot) && updatedBySlot.length > 0) {
+                  existingToReschedule.id = updatedBySlot[0].id;
+                } else {
+                  const { data: newBk } = await supabaseClient
+                    .from('bookings')
+                    .insert([{
+                      student_id: targetStudentId,
+                      session_date: isoDate,
+                      session_time: startTime,
+                      duration_minutes: sessionDuration,
+                      status: 'confirmed'
+                    }])
+                    .select();
+                  if (newBk && newBk.length > 0) {
+                    existingToReschedule.id = newBk[0].id;
+                  }
                 }
               }
             }
@@ -2652,7 +2892,7 @@ function renderOnboardingScreen() {
           }
 
           await Promise.all([
-            persistScheduleSlotsToSupabase(),
+            persistScheduleSlotsToSupabase(isoDate),
             persistStudentToSupabase(student)
           ]);
           saveAppData();
@@ -2714,12 +2954,15 @@ function renderOnboardingScreen() {
             const idx = activeStudent.active_bookings.findIndex(b => b.id === tempId);
             if (idx !== -1) activeStudent.active_bookings[idx].id = result.booking.id;
             
-            // Фиксируем ID абонемента из базы, не трогая локально вычтенный баланс
+            // Фиксируем ID абонемента из базы и синхронизируем профиль и слоты
             if (result.sub && result.sub.id) {
               activeStudent.subscription.id = result.sub.id;
             }
             
-            await persistScheduleSlotsToSupabase();
+            await Promise.all([
+              persistScheduleSlotsToSupabase(isoDate),
+              persistStudentToSupabase(activeStudent)
+            ]);
             saveAppData();
           } else {
             // В случае сетевой ошибки возвращаем слот и занятие назад
@@ -2766,26 +3009,32 @@ function renderOnboardingScreen() {
   showToast('Отмена брони... Занятие возвращено на баланс');
   renderApp();
 
-  // 3. Фоновая синхронизация с базой (без блокировки экрана)
+  // 3. Фоновая синхронизация с базой (DELETE из bookings + декремент used_sessions в subscriptions)
   Promise.resolve().then(async () => {
     try {
-      ensureSupabaseClient();
+      await waitForSupabaseClient();
       if (supabaseClient) {
-        if (bookingId && !String(bookingId).startsWith('bk-')) {
-          await supabaseClient.from('bookings').delete().eq('id', bookingId);
-        } else {
-          const targetNumericId = toValidNumericIdOrNull(student.supabase_id || student.id);
-          if (targetNumericId) {
-            await supabaseClient.from('bookings').delete().eq('student_id', targetNumericId).eq('session_date', target.date).eq('session_time', target.time);
-          }
+        const validBookingUuid = toValidUuidOrNull(bookingId);
+        const targetStudentUuid = toValidUuidOrNull(student.supabase_id || student.id || (currentUser && currentUser.id));
+
+        if (validBookingUuid) {
+          await supabaseClient.from('bookings').delete().eq('id', validBookingUuid);
+        }
+        if (targetStudentUuid && target.date && target.time) {
+          await supabaseClient.from('bookings').delete().eq('student_id', targetStudentUuid).eq('session_date', target.date).eq('session_time', target.time);
         }
 
-        await persistStudentToSupabase(student);
-        await persistScheduleSlotsToSupabase();
-        
-        if (student.subscription && student.subscription.id) {
-          await supabaseClient.from('subscriptions').update({ used_sessions: student.subscription.used }).eq('id', student.subscription.id);
+        const subUuid = toValidUuidOrNull(student.subscription && student.subscription.id);
+        if (subUuid) {
+          await supabaseClient.from('subscriptions').update({ used_sessions: student.subscription.used }).eq('id', subUuid);
+        } else if (targetStudentUuid) {
+          await supabaseClient.from('subscriptions').update({ used_sessions: student.subscription.used }).eq('student_id', targetStudentUuid);
         }
+
+        await Promise.all([
+          persistStudentToSupabase(student),
+          persistScheduleSlotsToSupabase(target.date)
+        ]);
       }
     } catch (err) {
       console.warn("Ошибка синхронизации отмены с Supabase:", err);
@@ -3287,6 +3536,27 @@ async function handleExerciseVideoUpload(event, idx) {
         student.workouts.push(savedObj);
       }
 
+      await waitForSupabaseClient();
+      const studentUuidForMedia = toValidUuidOrNull(student.supabase_id || student.id);
+      if (supabaseClient && studentUuidForMedia) {
+        try {
+          const videoExercises = validExercises.filter(ex => ex.video_url || ex.video_file_id);
+          if (videoExercises.length > 0) {
+            const mediaRows = videoExercises.map(ex => ({
+              student_id: studentUuidForMedia,
+              type: 'workout_video',
+              storage_path: ex.video_url || ex.video_file_id || '',
+              file_name: `${ex.name}.mp4`,
+              mime_type: 'video/mp4',
+              metadata: { workout_id: savedObj.id, date: savedObj.date, exercise: ex.name, sets: ex.sets, reps: ex.reps, weight: ex.weight }
+            }));
+            await supabaseClient.from('media_assets').insert(mediaRows);
+          }
+        } catch (mediaErr) {
+          console.warn('Предупреждение записи media_assets для тренировки:', mediaErr);
+        }
+      }
+
       await persistStudentToSupabase(student);
       refreshStudentExercisesDatalist();
       uiState.workoutEditorOpen = false;
@@ -3627,6 +3897,24 @@ async function handleExerciseVideoUpload(event, idx) {
       });
 
       student.inbody.push(record);
+      await waitForSupabaseClient();
+      if (supabaseClient) {
+        try {
+          const safeStudentUuid = toValidUuidOrNull(student.supabase_id || student.id || (currentUser && currentUser.id));
+          await supabaseClient
+            .from('student_reports')
+            .insert([{
+              student_id: safeStudentUuid,
+              student_code: student.access_code || 'N/A',
+              type: 'inbody_scan',
+              photo_file_id: JSON.stringify(record),
+              telegram_msg_id: 0,
+              created_at: new Date().toISOString()
+            }]);
+        } catch (inbodyRepErr) {
+          console.warn('Не удалось записать срез inbody_scan в student_reports:', inbodyRepErr);
+        }
+      }
       await persistStudentToSupabase(student);
       closeModal();
       triggerHaptic('success');
@@ -3786,20 +4074,32 @@ async function handleExerciseVideoUpload(event, idx) {
 
         latestReport[fileIdKey] = shortFileId;
 
-        ensureSupabaseClient();
+        await waitForSupabaseClient();
         if (supabaseClient) {
           try {
-            const safeNumericStudentId = toValidNumericIdOrNull(student.supabase_id || student.id);
+            const safeStudentUuid = toValidUuidOrNull(student.supabase_id || student.id || (currentUser && currentUser.id));
             await supabaseClient
               .from('student_reports')
               .insert([{
-                student_id: safeNumericStudentId,
+                student_id: safeStudentUuid,
                 student_code: student.access_code || 'N/A',
                 type: 'weekly_photo',
                 photo_file_id: shortFileId,
                 telegram_msg_id: tgMsgId,
                 created_at: new Date().toISOString()
               }]);
+            if (safeStudentUuid) {
+              await supabaseClient
+                .from('media_assets')
+                .insert([{
+                  student_id: safeStudentUuid,
+                  type: 'weekly_photo',
+                  storage_path: shortFileId,
+                  file_name: `${key}.jpg`,
+                  mime_type: 'image/jpeg',
+                  metadata: { angle: key, date: latestReport.date, telegram_msg_id: tgMsgId }
+                }]);
+            }
           } catch (repErr) {
             console.warn('Не удалось записать weekly_photo в student_reports:', repErr);
           }
@@ -3851,9 +4151,10 @@ async function handleExerciseVideoUpload(event, idx) {
       latestReport[customFlagKey] = false;
       latestReport[fileIdKey] = '';
 
-      ensureSupabaseClient();
+      await waitForSupabaseClient();
       if (supabaseClient) {
         try {
+          const safeId = toValidUuidOrNull(student.supabase_id || student.id || (currentUser && currentUser.id));
           let delQuery = supabaseClient
             .from('student_reports')
             .delete()
@@ -3861,11 +4162,10 @@ async function handleExerciseVideoUpload(event, idx) {
 
           if (oldFileId) {
             delQuery = delQuery.eq('photo_file_id', oldFileId);
+          } else if (safeId) {
+            delQuery = delQuery.eq('student_id', safeId);
           } else if (student.access_code) {
             delQuery = delQuery.eq('student_code', student.access_code);
-          } else {
-            const safeId = toValidNumericIdOrNull(student.supabase_id || student.id);
-            if (safeId) delQuery = delQuery.eq('student_id', safeId);
           }
           await delQuery;
         } catch (delErr) {
@@ -3938,6 +4238,34 @@ async function handleExerciseVideoUpload(event, idx) {
         digestion: dgEl && !isNaN(parseInt(dgEl.value, 10)) ? parseInt(dgEl.value, 10) : 8,
         comment: (cEl && cEl.value.trim()) ? cEl.value.trim() : ''
       };
+
+      await waitForSupabaseClient();
+      const studentUuid = toValidUuidOrNull(student.supabase_id || student.id || (currentUser && currentUser.id));
+      if (supabaseClient && studentUuid) {
+        try {
+          const checkupMetaJson = JSON.stringify(record);
+          const { data: insertedChk, error: chkErr } = await supabaseClient
+            .from('weekly_checkups')
+            .insert([{
+              student_id: studentUuid,
+              week_start_date: formatISO(getTodayDateObj()),
+              sleep_quality: Number(record.sleep) || 8,
+              stress_level: Number(record.digestion) || 8,
+              diet_adherence: Number(record.diet) || 8,
+              recovery_notes: record.comment || record.weights_growth || '',
+              coach_feedback: checkupMetaJson,
+              is_reviewed: false,
+              submitted_at: new Date().toISOString()
+            }])
+            .select()
+            .maybeSingle();
+          if (!chkErr && insertedChk && insertedChk.id) {
+            record.id = insertedChk.id;
+          }
+        } catch (chkInsertErr) {
+          console.warn('Ошибка записи в weekly_checkups:', chkInsertErr);
+        }
+      }
 
       student.checkups.push(record);
       await persistStudentToSupabase(student);
@@ -4480,21 +4808,21 @@ async function handleExerciseVideoUpload(event, idx) {
       const badgeEl = document.getElementById('tr-mgmt-payment-day-badge');
       if (badgeEl) badgeEl.textContent = `${newDay}-е число`;
 
-      const targetUserId = targetStudent.supabase_id || targetStudent.id;
-      ensureSupabaseClient();
-      if (supabaseClient && targetUserId && !String(targetUserId).startsWith('step-')) {
+      const targetUserId = toValidUuidOrNull(targetStudent.supabase_id || targetStudent.id);
+      await waitForSupabaseClient();
+      if (supabaseClient && targetUserId) {
         try {
-          if (targetStudent.subscription.id) {
+          const subUuid = toValidUuidOrNull(targetStudent.subscription.id);
+          if (subUuid) {
             await supabaseClient
               .from('subscriptions')
               .update({ billing_day: Number(newDay) || 1 })
-              .eq('id', targetStudent.subscription.id);
+              .eq('id', subUuid);
           } else {
             await supabaseClient
               .from('subscriptions')
               .update({ billing_day: Number(newDay) || 1 })
-              .eq('student_id', targetUserId)
-              .eq('status', 'active');
+              .eq('student_id', targetUserId);
           }
         } catch (err) {
           console.warn('Ошибка точечного обновления billing_day в subscriptions:', err);
@@ -4509,6 +4837,7 @@ async function handleExerciseVideoUpload(event, idx) {
     async function toggleStudentFreezeStatus() {
       const student = getCurrentStudent();
       if (!student) return;
+      if (!student.freeze_details) student.freeze_details = { is_frozen: false, from: '2026-11-01', to: '2026-11-15' };
       const fromEl = document.getElementById('freeze-from');
       const toEl = document.getElementById('freeze-to');
       if (fromEl) student.freeze_details.from = fromEl.value;
@@ -4516,6 +4845,29 @@ async function handleExerciseVideoUpload(event, idx) {
 
       student.freeze_details.is_frozen = !student.freeze_details.is_frozen;
       student.status = student.freeze_details.is_frozen ? 'frozen' : 'active';
+      if (student.subscription) student.subscription.status = student.status;
+
+      await waitForSupabaseClient();
+      const studentUuid = toValidUuidOrNull(student.supabase_id || student.id || (currentUser && currentUser.id));
+      if (supabaseClient && studentUuid) {
+        try {
+          const subUuid = toValidUuidOrNull(student.subscription && student.subscription.id);
+          if (subUuid) {
+            await supabaseClient
+              .from('subscriptions')
+              .update({ status: student.status })
+              .eq('id', subUuid);
+          } else {
+            await supabaseClient
+              .from('subscriptions')
+              .update({ status: student.status })
+              .eq('student_id', studentUuid);
+          }
+        } catch (freezeErr) {
+          console.warn('Ошибка обновления статуса заморозки в subscriptions:', freezeErr);
+        }
+      }
+
       await persistStudentToSupabase(student);
       renderApp();
       triggerHaptic('success');
@@ -4527,6 +4879,7 @@ async function handleExerciseVideoUpload(event, idx) {
     async function updateFreezeDates() {
       const student = getCurrentStudent();
       if (!student) return;
+      if (!student.freeze_details) student.freeze_details = { is_frozen: false, from: '2026-11-01', to: '2026-11-15' };
       const fromEl = document.getElementById('freeze-from');
       const toEl = document.getElementById('freeze-to');
       if (fromEl) student.freeze_details.from = fromEl.value;
@@ -4815,10 +5168,8 @@ async function handleExerciseVideoUpload(event, idx) {
       triggerHaptic('success');
       showToast(`Расписание на ${formatHumanDate(iso)} сохранено!`);
 
-      // Фоновая отправка в базу
-      persistScheduleSlotsToSupabase().catch(err => {
-        console.warn('Ошибка сохранения расписания в Supabase:', err);
-      });
+      // Отправка сетки часов в schedule_slots и student_reports (schedule_meta)
+      await persistScheduleSlotsToSupabase(iso);
     }
 
     function renderTrainerSlotGeneratorModalContent() {
@@ -4903,27 +5254,34 @@ async function handleExerciseVideoUpload(event, idx) {
       triggerHaptic('warning');
       showToast(`Тренировка ${st ? st.full_name : ''} отменена. Занятие возвращено на баланс.`);
 
-      // Фоновая синхронизация
+      // Фоновая синхронизация (DELETE из bookings + возврат +1 занятия в subscriptions)
       Promise.resolve().then(async () => {
-        ensureSupabaseClient();
+        await waitForSupabaseClient();
         if (supabaseClient) {
           try {
-            if (cancelledBookingId && !String(cancelledBookingId).startsWith('bk-')) {
-              await supabaseClient.from('bookings').delete().eq('id', cancelledBookingId);
-            } else if (st) {
-              const safeNumericId = toValidNumericIdOrNull(st.supabase_id || st.id);
-              if (safeNumericId) {
-                let delQ = supabaseClient.from('bookings').delete().eq('student_id', safeNumericId).eq('session_date', isoDate);
-                if (startTime) delQ = delQ.eq('session_time', startTime);
-                await delQ;
+            const validBookingUuid = toValidUuidOrNull(cancelledBookingId);
+            const safeStudentUuid = st ? toValidUuidOrNull(st.supabase_id || st.id) : toValidUuidOrNull(studentId);
+
+            if (validBookingUuid) {
+              await supabaseClient.from('bookings').delete().eq('id', validBookingUuid);
+            }
+            if (safeStudentUuid) {
+              let delQ = supabaseClient.from('bookings').delete().eq('student_id', safeStudentUuid).eq('session_date', isoDate);
+              if (startTime) delQ = delQ.eq('session_time', startTime);
+              await delQ;
+            }
+
+            if (st && st.subscription) {
+              const subUuid = toValidUuidOrNull(st.subscription.id);
+              if (subUuid) {
+                await supabaseClient.from('subscriptions').update({ used_sessions: st.subscription.used }).eq('id', subUuid);
+              } else if (safeStudentUuid) {
+                await supabaseClient.from('subscriptions').update({ used_sessions: st.subscription.used }).eq('student_id', safeStudentUuid);
               }
             }
+
             if (st) await persistStudentToSupabase(st);
-            await persistScheduleSlotsToSupabase();
-            
-            if (st && st.subscription && st.subscription.id) {
-              await supabaseClient.from('subscriptions').update({ used_sessions: st.subscription.used }).eq('id', st.subscription.id);
-            }
+            await persistScheduleSlotsToSupabase(isoDate);
           } catch (e) {
             console.warn('Ошибка отмены бронирования тренером в Supabase:', e);
           }
@@ -4938,7 +5296,7 @@ async function handleExerciseVideoUpload(event, idx) {
       if (!slot || slot.booked_by) return;
       slot.is_open = !slot.is_open;
       slot.baseline_closed = !slot.is_open;
-      await persistScheduleSlotsToSupabase();
+      await persistScheduleSlotsToSupabase(isoDate);
       renderApp();
     }
 
@@ -5304,7 +5662,7 @@ function copyInviteCode(code, name = '') {
         copyInviteCode(customCode, fio);
         showToast(`Подопечный ${fio} создан!`);
 
-        // 3. В фоне синхронизируем с Supabase и подтягиваем реальный числовой ID
+        // 3. Синхронизируем с Supabase (users, subscriptions, student_reports) и подтягиваем UUID
         syncStudentToCloud(newStudent).then((savedOk) => {
           if (savedOk) {
             saveAppData();
@@ -5355,18 +5713,6 @@ function copyInviteCode(code, name = '') {
         w.status = 'reviewed';
         w.reviewed = true;
         w.checked = true;
-        ensureSupabaseClient();
-        if (supabaseClient && w.id && !String(w.id).startsWith('w-')) {
-          try {
-            await supabaseClient.from('workouts').update({
-              trainer_feedback: text,
-              trainer_comment: text,
-              status: 'reviewed',
-              reviewed: true,
-              checked: true
-            }).eq('id', w.id);
-          } catch (e) {}
-        }
         await persistStudentToSupabase(st);
         triggerHaptic('success');
         showToast('Комментарий к тренировке сохранён в облаке и виден подопечному!');
@@ -5393,18 +5739,6 @@ function copyInviteCode(code, name = '') {
           commentEl.value = feedbackToSave;
         }
 
-        ensureSupabaseClient();
-        if (supabaseClient && w.id && !String(w.id).startsWith('w-')) {
-          try {
-            await supabaseClient.from('workouts').update({
-              trainer_feedback: feedbackToSave,
-              trainer_comment: feedbackToSave,
-              status: 'reviewed',
-              reviewed: true,
-              checked: true
-            }).eq('id', w.id);
-          } catch (e) {}
-        }
         await persistStudentToSupabase(st);
         renderApp();
       }
@@ -5467,12 +5801,51 @@ function copyInviteCode(code, name = '') {
       const rawC = cEl ? parseFloat(String(cEl.value || '').replace(',', '.')) : NaN;
       const rawW = wEl ? parseFloat(String(wEl.value || '').replace(',', '.')) : NaN;
       const rawA = aEl ? parseFloat(String(aEl.value || '').replace(',', '.')) : NaN;
+      const todayIso = formatISO(getTodayDateObj());
       const entry = {
-        date: formatDotDate(formatISO(getTodayDateObj())),
+        date: formatDotDate(todayIso),
         chest: !isNaN(rawC) ? rawC : last.chest,
         waist: !isNaN(rawW) ? rawW : last.waist,
         arms: !isNaN(rawA) ? rawA : last.arms
       };
+
+      await waitForSupabaseClient();
+      const studentUuid = toValidUuidOrNull(st.supabase_id || st.id);
+      if (supabaseClient && studentUuid) {
+        try {
+          const { data: insAnthro, error: anthroErr } = await supabaseClient
+            .from('anthropometry_records')
+            .insert([{
+              student_id: studentUuid,
+              chest: entry.chest,
+              waist: entry.waist,
+              biceps: entry.arms,
+              recorded_at: todayIso
+            }])
+            .select()
+            .maybeSingle();
+
+          if (anthroErr) {
+            const { data: insAnthroAlt } = await supabaseClient
+              .from('anthropometry_records')
+              .insert([{
+                student_id: studentUuid,
+                chest: entry.chest,
+                waist: entry.waist,
+                arms: entry.arms,
+                recorded_at: todayIso
+              }])
+              .select()
+              .maybeSingle();
+            if (insAnthroAlt && insAnthroAlt.id) entry.id = insAnthroAlt.id;
+          } else if (insAnthro && insAnthro.id) {
+            entry.id = insAnthro.id;
+          }
+        } catch (anthroInsertErr) {
+          console.warn('Ошибка записи в anthropometry_records:', anthroInsertErr);
+        }
+      }
+
       st.anthropometry.push(entry);
       await persistStudentToSupabase(st);
       closeModal();
@@ -5482,67 +5855,92 @@ function copyInviteCode(code, name = '') {
     }
 
     async function adjustStudentRemainingBalance(studentId, delta) {
-    const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId));
-    if (!st || !st.subscription) return;
+      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId));
+      if (!st || !st.subscription) return;
 
-    const total = Math.max(0, Number(st.subscription.total_sessions ?? st.subscription.total ?? 0));
-    
-    // Берём текущий реальный остаток без вычитания used_sessions
-    let currentRem = Number(st.subscription.remaining);
-    if (isNaN(currentRem)) {
-      const prevUsed = Number(st.subscription.used_sessions ?? st.subscription.used ?? 0);
-      currentRem = Math.max(0, total - prevUsed);
+      const total = Math.max(0, Number(st.subscription.total_sessions ?? st.subscription.total ?? 0));
+
+      let currentRem = Number(st.subscription.remaining);
+      if (isNaN(currentRem)) {
+        const prevUsed = Number(st.subscription.used_sessions ?? st.subscription.used ?? 0);
+        currentRem = Math.max(0, total - prevUsed);
+      }
+
+      let newRemaining = currentRem + Number(delta || 0);
+      if (newRemaining < 0) newRemaining = 0;
+      if (total > 0 && newRemaining > total) newRemaining = total;
+
+      const newUsed = Math.max(0, total - newRemaining);
+
+      st.subscription.total = total;
+      st.subscription.total_sessions = total;
+      st.subscription.remaining = newRemaining;
+      st.subscription.used = newUsed;
+      st.subscription.used_sessions = newUsed;
+
+      await waitForSupabaseClient();
+      const studentUuid = toValidUuidOrNull(st.supabase_id || st.id);
+      const subUuid = toValidUuidOrNull(st.subscription.id);
+      if (supabaseClient) {
+        try {
+          if (subUuid) {
+            await supabaseClient.from('subscriptions').update({ total_sessions: total, used_sessions: newUsed }).eq('id', subUuid);
+          } else if (studentUuid) {
+            await supabaseClient.from('subscriptions').update({ total_sessions: total, used_sessions: newUsed }).eq('student_id', studentUuid);
+          }
+        } catch (subUpdErr) {
+          console.warn('Ошибка точечного обновления баланса в subscriptions:', subUpdErr);
+        }
+      }
+
+      await persistStudentToSupabase(st);
+      renderApp();
+      triggerHaptic('light');
+      showToast(`Баланс сохранён: осталось ${newRemaining} из ${total}`);
     }
 
-    // Применяем дельту (+1 или -1)
-    let newRemaining = currentRem + Number(delta || 0);
-    if (newRemaining < 0) newRemaining = 0;
-    if (total > 0 && newRemaining > total) newRemaining = total;
-
-    // Использованные строго равны остатку до общего пакета
-    const newUsed = Math.max(0, total - newRemaining);
-
-    // Записываем во все дублирующие поля объекта
-    st.subscription.total = total;
-    st.subscription.total_sessions = total;
-    st.subscription.remaining = newRemaining;
-    st.subscription.used = newUsed;
-    st.subscription.used_sessions = newUsed;
-
-    await persistStudentToSupabase(st);
-    renderApp();
-    triggerHaptic('light');
-    showToast(`Баланс сохранён: осталось ${newRemaining} из ${total}`);
-  }
-
     async function updateStudentTotalSubscription(studentId, totalVal) {
-  const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId));
-  if (!st || !st.subscription) return;
+      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId));
+      if (!st || !st.subscription) return;
 
-  const newTotal = Math.max(0, parseInt(totalVal, 10) || 0);
+      const newTotal = Math.max(0, parseInt(totalVal, 10) || 0);
 
-  // Берём текущий остаток напрямую, без вычитания used_sessions
-  let currentRem = Number(st.subscription.remaining);
-  if (isNaN(currentRem)) {
-    const prevUsed = Number(st.subscription.used_sessions ?? st.subscription.used ?? 0);
-    currentRem = Math.max(0, newTotal - prevUsed);
-  }
-  if (newTotal > 0 && currentRem > newTotal) {
-    currentRem = newTotal;
-  }
+      let currentRem = Number(st.subscription.remaining);
+      if (isNaN(currentRem)) {
+        const prevUsed = Number(st.subscription.used_sessions ?? st.subscription.used ?? 0);
+        currentRem = Math.max(0, newTotal - prevUsed);
+      }
+      if (newTotal > 0 && currentRem > newTotal) {
+        currentRem = newTotal;
+      }
 
-  const currentUsed = Math.max(0, newTotal - currentRem);
+      const currentUsed = Math.max(0, newTotal - currentRem);
 
-  st.subscription.total = newTotal;
-  st.subscription.total_sessions = newTotal;
-  st.subscription.used = currentUsed;
-  st.subscription.used_sessions = currentUsed;
-  st.subscription.remaining = currentRem;
+      st.subscription.total = newTotal;
+      st.subscription.total_sessions = newTotal;
+      st.subscription.used = currentUsed;
+      st.subscription.used_sessions = currentUsed;
+      st.subscription.remaining = currentRem;
 
-  await persistStudentToSupabase(st);
-  renderApp();
-  showToast(`Пакет обновлён в базе: ${currentRem} из ${newTotal} занятий`);
-}
+      await waitForSupabaseClient();
+      const studentUuid = toValidUuidOrNull(st.supabase_id || st.id);
+      const subUuid = toValidUuidOrNull(st.subscription.id);
+      if (supabaseClient) {
+        try {
+          if (subUuid) {
+            await supabaseClient.from('subscriptions').update({ total_sessions: newTotal, used_sessions: currentUsed }).eq('id', subUuid);
+          } else if (studentUuid) {
+            await supabaseClient.from('subscriptions').update({ total_sessions: newTotal, used_sessions: currentUsed }).eq('student_id', studentUuid);
+          }
+        } catch (subUpdErr) {
+          console.warn('Ошибка точечного обновления пакета в subscriptions:', subUpdErr);
+        }
+      }
+
+      await persistStudentToSupabase(st);
+      renderApp();
+      showToast(`Пакет обновлён в базе: ${currentRem} из ${newTotal} занятий`);
+    }
 
     async function setStudentSessionDuration(studentId, durationMins) {
       const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
@@ -5551,6 +5949,22 @@ function copyInviteCode(code, name = '') {
       syncTrainerManagementDraftFromDOM(st);
 
       st.session_duration = Number(durationMins) || 60;
+
+      await waitForSupabaseClient();
+      const studentUuid = toValidUuidOrNull(st.supabase_id || st.id);
+      const subUuid = toValidUuidOrNull(st.subscription && st.subscription.id);
+      if (supabaseClient) {
+        try {
+          if (subUuid) {
+            await supabaseClient.from('subscriptions').update({ session_duration_minutes: st.session_duration }).eq('id', subUuid);
+          } else if (studentUuid) {
+            await supabaseClient.from('subscriptions').update({ session_duration_minutes: st.session_duration }).eq('student_id', studentUuid);
+          }
+        } catch (durErr) {
+          console.warn('Ошибка точечного обновления session_duration_minutes:', durErr);
+        }
+      }
+
       await persistStudentToSupabase(st);
       renderApp();
       triggerHaptic('light');
@@ -5604,7 +6018,7 @@ function copyInviteCode(code, name = '') {
 
       const targetDbId = st ? (st.supabase_id || st.id) : strId;
       const targetCode = st ? String(st.access_code || '').trim().toUpperCase() : '';
-      const safeNumericId = toValidNumericIdOrNull(targetDbId);
+      let safeStudentUuid = toValidUuidOrNull(targetDbId);
 
       // 1. Мгновенно вычищаем из локального массива appData
       appData.students = (appData.students || []).filter(s => {
@@ -5645,27 +6059,45 @@ function copyInviteCode(code, name = '') {
       renderApp();
       triggerHaptic('warning');
 
-      // 2. Полное удаление из Supabase
-      ensureSupabaseClient();
+      // 2. Полное каскадное удаление из Supabase (users, subscriptions, bookings, student_reports, weekly_checkups, anthropometry_records, media_assets)
+      await waitForSupabaseClient();
       if (supabaseClient) {
         try {
-          const deletePromises = [];
+          if (!safeStudentUuid && targetCode) {
+            const { data: foundUsers } = await supabaseClient
+              .from('users')
+              .select('id')
+              .or(`username.eq.${targetCode},username.ilike.${targetCode}|%`)
+              .limit(1);
+            if (Array.isArray(foundUsers) && foundUsers.length > 0) {
+              safeStudentUuid = toValidUuidOrNull(foundUsers[0].id);
+            }
+          }
 
+          const childDeletes = [];
           if (targetCode) {
-            deletePromises.push(supabaseClient.from('student_reports').delete().eq('student_code', targetCode));
+            childDeletes.push(supabaseClient.from('student_reports').delete().eq('student_code', targetCode));
           }
-          if (safeNumericId) {
-            deletePromises.push(supabaseClient.from('student_reports').delete().eq('student_id', safeNumericId));
-            deletePromises.push(supabaseClient.from('bookings').delete().eq('student_id', safeNumericId));
-            deletePromises.push(supabaseClient.from('subscriptions').delete().eq('student_id', safeNumericId));
-            deletePromises.push(supabaseClient.from('users').delete().eq('id', safeNumericId));
+          if (safeStudentUuid) {
+            childDeletes.push(supabaseClient.from('student_reports').delete().eq('student_id', safeStudentUuid));
+            childDeletes.push(supabaseClient.from('bookings').delete().eq('student_id', safeStudentUuid));
+            childDeletes.push(supabaseClient.from('subscriptions').delete().eq('student_id', safeStudentUuid));
+            childDeletes.push(supabaseClient.from('weekly_checkups').delete().eq('student_id', safeStudentUuid));
+            childDeletes.push(supabaseClient.from('anthropometry_records').delete().eq('student_id', safeStudentUuid));
+            childDeletes.push(supabaseClient.from('media_assets').delete().eq('student_id', safeStudentUuid));
           }
 
+          await Promise.allSettled(childDeletes);
+
+          const userDeletes = [];
+          if (safeStudentUuid) {
+            userDeletes.push(supabaseClient.from('users').delete().eq('id', safeStudentUuid));
+          }
           if (targetCode) {
-            deletePromises.push(supabaseClient.from('users').delete().ilike('username', `${targetCode}%`));
+            userDeletes.push(supabaseClient.from('users').delete().ilike('username', `${targetCode}%`));
           }
+          await Promise.allSettled(userDeletes);
 
-          await Promise.allSettled(deletePromises);
           await persistScheduleSlotsToSupabase();
           showToast('Подопечный навсегда удалён из базы');
         } catch (err) {
@@ -5684,6 +6116,33 @@ function copyInviteCode(code, name = '') {
       if (!st) return;
 
       syncTrainerManagementDraftFromDOM(st);
+
+      await waitForSupabaseClient();
+      const studentUuid = toValidUuidOrNull(st.supabase_id || st.id);
+      const subUuid = toValidUuidOrNull(st.subscription && st.subscription.id);
+      if (supabaseClient && studentUuid) {
+        try {
+          const encodedUsername = buildEncodedUsername(st.access_code, st.telegram_username);
+          await supabaseClient
+            .from('users')
+            .update({ username: encodedUsername })
+            .eq('id', studentUuid);
+
+          const subPayload = {
+            total_sessions: Number(st.subscription?.total_sessions ?? st.subscription?.total ?? 8) || 0,
+            used_sessions: Number(st.subscription?.used_sessions ?? st.subscription?.used ?? 0) || 0,
+            billing_day: Number(st.subscription?.billing_day ?? st.subscription?.payment_day ?? 1) || 1,
+            session_duration_minutes: Number(st.session_duration) || 60
+          };
+          if (subUuid) {
+            await supabaseClient.from('subscriptions').update(subPayload).eq('id', subUuid);
+          } else {
+            await supabaseClient.from('subscriptions').update(subPayload).eq('student_id', studentUuid);
+          }
+        } catch (mgmtErr) {
+          console.warn('Предупреждение точечного обновления в saveTrainerManagementFinanceAndNotes:', mgmtErr);
+        }
+      }
 
       const ok = await persistStudentToSupabase(st);
       if (ok) {
