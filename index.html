@@ -3394,101 +3394,87 @@ function renderOnboardingScreen() {
 
     let exerciseUploadChain = Promise.resolve();
 
-async function handleExerciseVideoUpload(event, idx) {
-  const file = event.target.files && event.target.files[0];
-  if (!file) return;
+    async function handleExerciseVideoUpload(event, idx) {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
 
-  syncDraftWorkoutFromDOM();
+      syncDraftWorkoutFromDOM();
 
-  const d = uiState.draftWorkout;
-  if (!d || !d.exercises || !d.exercises[idx]) return;
+      const d = uiState.draftWorkout;
+      if (!d || !d.exercises || !d.exercises[idx]) return;
 
-  // Сразу помечаем элемент как стоящий в очереди
-  d.exercises[idx].is_uploading = true;
-  d.exercises[idx].upload_status = 'В очереди...';
-  renderApp();
-
-  // Добавляем обработку в строгую очередь: второе видео ждёт окончания первого
-  exerciseUploadChain = exerciseUploadChain.then(async () => {
-    const backdrop = document.getElementById('modal-backdrop');
-    if (backdrop) {
-      backdrop.innerHTML = '<div class="w-full h-full flex items-center justify-center text-[#00E676] font-bold text-center px-6 bg-black/80">Идёт сжатие и загрузка видео...<br>Пожалуйста, не закрывайте окно.</div>';
-      backdrop.classList.remove('hidden');
-      backdrop.classList.add('flex');
-    }
-    try {
-      if (!d.exercises[idx]) return;
-
-      d.exercises[idx].upload_status = file.size > 45 * 1024 * 1024 ? 'Сжатие 720p...' : 'Загрузка...';
+      // Сразу отображаем статус ожидания в кнопке упражнения
+      d.exercises[idx].is_uploading = true;
+      d.exercises[idx].upload_status = 'В очереди...';
       renderApp();
 
-      const processedFile = await compressVideoFile(file, (txt) => {
-        if (d.exercises[idx]) {
-          d.exercises[idx].upload_status = txt;
-          const lbl = document.getElementById(`ex-video-status-${idx}`);
-          if (lbl) lbl.innerText = txt;
-        }
-      });
-
-      if (d.exercises[idx]) {
-        d.exercises[idx].upload_status = 'Отправка...';
-        const lbl = document.getElementById(`ex-video-status-${idx}`);
-        if (lbl) lbl.innerText = 'Отправка...';
-      }
-
-      const student = (typeof getCurrentStudent === 'function') ? getCurrentStudent() : null;
-      const exName = d.exercises[idx].name || 'Упражнение';
-      const caption = `🏋️ Подход: ${exName}\nУченик: ${student ? (student.full_name || student.name || '—') : '—'}`;
-
-      // Отправка с повторной попыткой при разрыве мобильного интернета
-      let uploadRes = null;
-      let lastErr = null;
-      for (let attempt = 1; attempt <= 2; attempt++) {
+      // Добавляем задачу в очередь без блокировки интерфейса
+      exerciseUploadChain = exerciseUploadChain.then(async () => {
         try {
-          uploadRes = await uploadVideoMediaToTelegram(processedFile, caption);
-          if (uploadRes && uploadRes.video_url) break;
-        } catch (e) {
-          lastErr = e;
-          if (attempt === 1) {
-            await new Promise(r => setTimeout(r, 1500));
+          if (!d.exercises || !d.exercises[idx]) return;
+
+          d.exercises[idx].upload_status = file.size > 45 * 1024 * 1024 ? 'Сжатие 720p...' : 'Загрузка...';
+          renderApp();
+
+          const processedFile = await compressVideoFile(file, (txt) => {
+            if (d.exercises && d.exercises[idx]) {
+              d.exercises[idx].upload_status = txt;
+              const lbl = document.getElementById(`ex-video-status-${idx}`);
+              if (lbl) lbl.innerText = txt;
+            }
+          });
+
+          if (d.exercises && d.exercises[idx]) {
+            d.exercises[idx].upload_status = 'Отправка...';
+            const lbl = document.getElementById(`ex-video-status-${idx}`);
+            if (lbl) lbl.innerText = 'Отправка...';
           }
+
+          const student = (typeof getCurrentStudent === 'function') ? getCurrentStudent() : null;
+          const exName = (d.exercises && d.exercises[idx] && d.exercises[idx].name) ? d.exercises[idx].name : 'Упражнение';
+          const caption = `🏋️ Подход: ${exName}\nУченик: ${student ? (student.full_name || student.name || '—') : '—'}`;
+
+          let uploadRes = null;
+          let lastErr = null;
+          for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+              uploadRes = await uploadVideoMediaToTelegram(processedFile, caption);
+              if (uploadRes && uploadRes.video_url) break;
+            } catch (e) {
+              lastErr = e;
+              if (attempt === 1) await new Promise(r => setTimeout(r, 1500));
+            }
+          }
+
+          if (!uploadRes || !uploadRes.video_url) {
+            throw lastErr || new Error('Не удалось загрузить видео');
+          }
+
+          if (d.exercises && d.exercises[idx]) {
+            d.exercises[idx].video_url = uploadRes.video_url;
+            d.exercises[idx].video_file_id = uploadRes.file_id;
+          }
+          if (typeof showToast === 'function') showToast(`Видео для упр. ${idx + 1} сохранено`);
+        } catch (err) {
+          console.error('Ошибка загрузки видео:', err);
+          const msg = err && err.message ? err.message : 'Ошибка сети при загрузке';
+          if (typeof showToast === 'function') showToast(msg, 'error');
+        } finally {
+          if (d.exercises && d.exercises[idx]) {
+            delete d.exercises[idx].is_uploading;
+            delete d.exercises[idx].upload_status;
+          }
+          renderApp();
         }
-      }
-
-      if (!uploadRes || !uploadRes.video_url) {
-        throw lastErr || new Error('Не удалось загрузить видео');
-      }
-
-      d.exercises[idx].video_url = uploadRes.video_url;
-      d.exercises[idx].video_file_id = uploadRes.file_id;
-      if (typeof showToast === 'function') showToast('Видео подхода сохранено');
-
-    } catch (err) {
-      console.error('Ошибка загрузки видео:', err);
-      const msg = err && err.message ? err.message : 'Ошибка сети при загрузке';
-      if (typeof showToast === 'function') showToast(msg, 'error');
-    } finally {
-      const backdrop = document.getElementById('modal-backdrop');
-      if (backdrop) {
-        backdrop.innerHTML = '<div id="modal-content" class="w-full max-w-[440px] bg-[#161B22] border border-[#30363D] rounded-2xl p-5 shadow-2xl max-h-[90vh] overflow-y-auto"></div>';
-        backdrop.classList.remove('flex');
-        backdrop.classList.add('hidden');
-      }
-      if (d.exercises[idx]) {
-        delete d.exercises[idx].is_uploading;
-        delete d.exercises[idx].upload_status;
-      }
-      renderApp();
+      }).catch((err) => {
+        console.error('Сбой в цепочке загрузки видео:', err);
+        if (d.exercises && d.exercises[idx]) {
+          delete d.exercises[idx].is_uploading;
+          delete d.exercises[idx].upload_status;
+        }
+        renderApp();
+      });
     }
-  }).catch((err) => {
-    console.error('Критический сбой в очереди видео:', err);
-    if (d.exercises[idx]) {
-      delete d.exercises[idx].is_uploading;
-      delete d.exercises[idx].upload_status;
-    }
-    renderApp();
-  });
-}
 
     function removeExerciseVideo(idx) {
       syncDraftWorkoutFromDOM();
