@@ -5321,14 +5321,19 @@ async function handleExerciseVideoUpload(event, idx) {
 
         if (s.booked_by) {
           const st = getStudentById(s.booked_by);
-          let span = 1;
-          while (i + span < daySlots.length && daySlots[i + span].booked_by === s.booked_by) {
-            span++;
-          }
+          
+          // Ищем конкретную бронь, начинающуюся ровно в этот час
+          const targetBooking = st && Array.isArray(st.active_bookings)
+            ? st.active_bookings.find(b => b.date === iso && b.time === s.time)
+            : null;
+
+          const durMins = targetBooking ? (Number(targetBooking.duration) || 60) : 60;
+          const hoursSpan = Math.max(1, Math.ceil(durMins / 60));
+          
           const startH = parseInt(s.time.split(':')[0], 10);
-          const durMins = st ? st.session_duration : span * 60;
           const endTotal = startH * 60 + durMins;
           const endStr = `${String(Math.floor(endTotal / 60)).padStart(2, '0')}:${String(endTotal % 60).padStart(2, '0')}`;
+
           renderedRows.push({
             type: 'booked',
             startTime: s.time,
@@ -5337,7 +5342,8 @@ async function handleExerciseVideoUpload(event, idx) {
             durationLabel: formatDurationLabel(durMins),
             isPast
           });
-          i += span;
+
+          i += hoursSpan;
         } else {
           renderedRows.push({
             type: 'slot',
