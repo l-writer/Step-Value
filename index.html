@@ -419,9 +419,9 @@
           front_custom: Boolean(pr.front_custom),
           side_custom: Boolean(pr.side_custom),
           back_custom: Boolean(pr.back_custom),
-          front_url: (pr.front_url && String(pr.front_url).length < 40000) ? pr.front_url : '',
-          side_url: (pr.side_url && String(pr.side_url).length < 40000) ? pr.side_url : '',
-          back_url: (pr.back_url && String(pr.back_url).length < 40000) ? pr.back_url : ''
+          front_url: pr.front_url || '',
+          side_url: pr.side_url || '',
+          back_url: pr.back_url || ''
         }));
 
         const metaObject = {
@@ -1699,7 +1699,7 @@ const TELEGRAM_STORAGE_CONFIG = {
       channelId: '-1004321392864'
     };
 
-    function compressImageToBlobAndDataUrl(fileOrBlob, maxDim = 1280, quality = 0.75) {
+    function compressImageToBlobAndDataUrl(fileOrBlob, maxDim = 640, quality = 0.58) {
       return new Promise((resolve, reject) => {
         if (!fileOrBlob || !(fileOrBlob instanceof Blob)) {
           reject(new Error('Некорректный файл изображения'));
@@ -1745,7 +1745,7 @@ const TELEGRAM_STORAGE_CONFIG = {
     async function uploadMediaToTelegram(fileOrBlob, captionText = '') {
       let payloadBlob = fileOrBlob;
       if (fileOrBlob instanceof File || (fileOrBlob instanceof Blob && (fileOrBlob.type !== 'image/jpeg' || fileOrBlob.size > 10 * 1024 * 1024))) {
-        const compressed = await compressImageToBlobAndDataUrl(fileOrBlob, 1280, 0.75);
+        const compressed = await compressImageToBlobAndDataUrl(fileOrBlob, 640, 0.58);
         payloadBlob = compressed.blob;
       }
 
@@ -4050,7 +4050,7 @@ function renderOnboardingScreen() {
       const file = event.target.files && event.target.files[0];
       if (!file || !uiState.pendingPhotoSlotKey) return;
       try {
-        const { blob: compressedBlob, dataUrl: compressedDataUrl } = await compressImageToBlobAndDataUrl(file, 1280, 0.75);
+        const { blob: compressedBlob, dataUrl: compressedDataUrl } = await compressImageToBlobAndDataUrl(file, 640, 0.58);
         const student = getCurrentStudent();
         if (!student) return;
         if (!Array.isArray(student.photo_reports) || student.photo_reports.length === 0) {
@@ -5009,7 +5009,7 @@ function renderOnboardingScreen() {
             <div class="flex items-center justify-between gap-3">
               <div>
                 <h3 class="text-sm font-bold text-white">Режим «Отпуск / Заморозка»</h3>
-                <p class="text-[11px] text-[#8B949E]">Отключает пуши и ставит статус «На паузе» у тренера</p>
+                <p class="text-[11px] text-[#8B949E]">Ставит статус «На паузе» у тренера</p>
               </div>
               <button onclick="toggleStudentFreezeStatus()" class="w-12 h-7 rounded-full p-1 transition shrink-0 ${fr.is_frozen ? 'bg-[#00E676]' : 'bg-[#090C10] border border-[#30363D]'} flex items-center">
                 <div class="w-5 h-5 rounded-full transition transform ${fr.is_frozen ? 'translate-x-5 bg-[#090C10]' : 'translate-x-0 bg-[#8B949E]'}"></div>
@@ -6672,7 +6672,7 @@ function copyInviteCode(code, name = '') {
                 <span class="text-[11px] text-[#8B949E]">День счёта: <strong id="tr-mgmt-payment-day-badge" class="text-white">${st.subscription.payment_day}-е число</strong></span>
               </div>
               <div>
-                <label class="block text-[11px] text-[#8B949E] mb-1">Индивидуальный день выставления счёта (только для тренера)</label>
+                <label class="block text-[11px] text-[#8B949E] mb-1">Индивидуальный день выставления счёта</label>
                 <select id="tr-mgmt-payment-day" onchange="updateStudentPaymentDay('${st.id}', this.value)" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs font-bold text-white outline-none">
                   ${Array.from({ length: 28 }, (_, idx) => idx + 1).map(d => `<option value="${d}" ${Number(st.subscription.payment_day) === d ? 'selected' : ''}>${d}-е число месяца</option>`).join('')}
                 </select>
