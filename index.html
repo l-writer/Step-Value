@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <title>Step Value — Персональный фитнес-хаб</title>
+  <title>Тренер Степан — WINNIEFIT</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
@@ -122,6 +122,7 @@
             booked_by: s.booked_by || null
           }));
         });
+        compactSchedule.booking_horizon_days = Number(appData.booking_horizon_days) || 10;
         const safeUserUuid = toValidUuidOrNull((currentUser && currentUser.id) || getCoachUuid());
         const schedulePayload = JSON.stringify(compactSchedule);
 
@@ -167,9 +168,10 @@
             if (!Array.isArray(daySlots) || daySlots.length === 0) continue;
 
             const slotRowsIso = daySlots.map(s => {
-              const startH = parseInt(String(s.time || '09:00').split(':')[0], 10) || 9;
-              const endH = startH + Math.ceil((Number(s.duration) || 60) / 60);
-              const endTimeStr = `${String(endH).padStart(2, '0')}:00`;
+              const startH = parseInt(String(s.time || '06:00').split(':')[0], 10);
+              const validStartH = isNaN(startH) ? 6 : startH;
+              const endH = validStartH + Math.ceil((Number(s.duration) || 60) / 60);
+              const endTimeStr = endH >= 24 ? '23:59' : `${String(endH).padStart(2, '0')}:00`;
               const row = {
                 start_time: `${isoDate}T${s.time}:00`,
                 end_time: `${isoDate}T${endTimeStr}:00`,
@@ -191,9 +193,10 @@
 
             if (slotInsErr) {
               const slotRowsTime = daySlots.map(s => {
-                const startH = parseInt(String(s.time || '09:00').split(':')[0], 10) || 9;
-                const endH = startH + Math.ceil((Number(s.duration) || 60) / 60);
-                const endTimeStr = `${String(endH).padStart(2, '0')}:00`;
+                const startH = parseInt(String(s.time || '06:00').split(':')[0], 10);
+                const validStartH = isNaN(startH) ? 6 : startH;
+                const endH = validStartH + Math.ceil((Number(s.duration) || 60) / 60);
+                const endTimeStr = endH >= 24 ? '23:59' : `${String(endH).padStart(2, '0')}:00`;
                 const row = {
                   start_time: s.time,
                   end_time: endTimeStr,
@@ -297,6 +300,7 @@
             username: encodedUsername,
             avatar_url: st.avatar || 'АТ'
           };
+          if (Number(st.telegram_id) > 0) updateUserPayload.telegram_id = Number(st.telegram_id);
           if (coachUuid) updateUserPayload.coach_id = coachUuid;
 
           const { error: userUpdErr } = await supabaseClient
@@ -330,8 +334,7 @@
           ? st.subscription.robokassa_sum
           : (subscriptionPrice > 0 ? formatRublesFromNumber(subscriptionPrice) : '15 000 ₽');
         const robokassaUrl = st.subscription?.robokassa_url || '';
-        const isFrozen = Boolean((st.freeze_details && st.freeze_details.is_frozen) || st.status === 'frozen');
-        const subStatus = isFrozen ? 'frozen' : 'active';
+        const subStatus = 'active';
         st.status = subStatus;
 
         st.price = subscriptionPrice;
@@ -419,22 +422,30 @@
           front_custom: Boolean(pr.front_custom),
           side_custom: Boolean(pr.side_custom),
           back_custom: Boolean(pr.back_custom),
-          front_url: (pr.front_url && String(pr.front_url).length < 40000) ? pr.front_url : '',
-          side_url: (pr.side_url && String(pr.side_url).length < 40000) ? pr.side_url : '',
-          back_url: (pr.back_url && String(pr.back_url).length < 40000) ? pr.back_url : ''
+          front_url: pr.front_url || '',
+          side_url: pr.side_url || '',
+          back_url: pr.back_url || ''
         }));
+
+        const normalizedNotifSettings = {
+          booking_notify: st.notification_settings?.booking_notify !== false,
+          sunday_checkup: st.notification_settings?.sunday_checkup !== false,
+          monthly_inbody_photos: st.notification_settings?.monthly_inbody_photos !== false
+        };
+        st.notification_settings = normalizedNotifSettings;
 
         const metaObject = {
           id: st.id,
           supabase_id: st.supabase_id || null,
+          telegram_id: Number(st.telegram_id) || null,
           access_code: cleanCode,
           telegram_username: cleanTg,
           full_name: fullName,
           avatar: st.avatar || 'АТ',
           status: subStatus,
+          workouts_enabled: Boolean(st.workouts_enabled),
           price: subscriptionPrice,
           session_duration: Number(durationMins) || 60,
-          freeze_details: st.freeze_details || { is_frozen: isFrozen, from: '2026-11-01', to: '2026-11-15' },
           subscription: {
             id: st.subscription.id || null,
             price: subscriptionPrice,
@@ -452,7 +463,7 @@
           payment_history: Array.isArray(st.payment_history) ? st.payment_history : [],
           medical_notes: st.medical_notes || '',
           trainer_private_notes: st.trainer_private_notes || '',
-          notification_settings: st.notification_settings || { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+          notification_settings: normalizedNotifSettings,
           workouts: (Array.isArray(st.workouts) ? st.workouts : []).map(w => {
             // Если в существующем массиве уже был комментарий или статус от тренера — сохраняем его железно
             return {
@@ -621,23 +632,24 @@
         student.subscription.robokassa_url = resolvedUrl;
       }
 
+      student.status = 'active';
+      if (user.telegram_id) student.telegram_id = Number(user.telegram_id);
       if (profileMeta) {
-        if (profileMeta.freeze_details) {
-          student.freeze_details = profileMeta.freeze_details;
-          student.status = (profileMeta.freeze_details.is_frozen || (sub && sub.status === 'frozen')) ? 'frozen' : 'active';
-        }
+        if (profileMeta.telegram_id && !student.telegram_id) student.telegram_id = Number(profileMeta.telegram_id);
+        if (profileMeta.workouts_enabled !== undefined) student.workouts_enabled = Boolean(profileMeta.workouts_enabled);
         if (profileMeta.medical_notes !== undefined) student.medical_notes = profileMeta.medical_notes;
         if (profileMeta.trainer_private_notes !== undefined) student.trainer_private_notes = profileMeta.trainer_private_notes;
-        if (profileMeta.notification_settings) student.notification_settings = profileMeta.notification_settings;
+        if (profileMeta.notification_settings) {
+          student.notification_settings = {
+            booking_notify: profileMeta.notification_settings.booking_notify !== false,
+            sunday_checkup: profileMeta.notification_settings.sunday_checkup !== false,
+            monthly_inbody_photos: profileMeta.notification_settings.monthly_inbody_photos !== false
+          };
+        }
         if (Array.isArray(profileMeta.workouts)) student.workouts = profileMeta.workouts;
         if (Array.isArray(profileMeta.anthropometry)) student.anthropometry = profileMeta.anthropometry.map(normalizeAnthropometryRecord);
         if (Array.isArray(profileMeta.checkups)) student.checkups = profileMeta.checkups;
         if (Array.isArray(profileMeta.inbody)) student.inbody = profileMeta.inbody.map(enrichInBodyRecord);
-      }
-      if (sub && sub.status === 'frozen') {
-        if (!student.freeze_details) student.freeze_details = { is_frozen: true, from: '2026-11-01', to: '2026-11-15' };
-        student.freeze_details.is_frozen = true;
-        student.status = 'frozen';
       }
 
       if (Array.isArray(bookings)) {
@@ -704,6 +716,7 @@
           currentCoachId = coachUser.id;
           if (appData && appData.trainer_profile) {
             appData.trainer_profile.supabase_id = coachUser.id;
+            if (coachUser.telegram_id) appData.trainer_profile.telegram_id = Number(coachUser.telegram_id);
           }
         }
         const users = allUsers.filter(u => !u.role || u.role === 'student');
@@ -722,6 +735,10 @@
           try {
             const parsedSchedule = JSON.parse(scheduleReport.photo_file_id);
             if (parsedSchedule && typeof parsedSchedule === 'object') {
+              const horizonVal = Number(parsedSchedule.booking_horizon_days ?? parsedSchedule._meta?.booking_horizon_days);
+              if (horizonVal > 0) {
+                appData.booking_horizon_days = horizonVal;
+              }
               Object.keys(parsedSchedule).forEach(dateKey => {
                 if (Array.isArray(parsedSchedule[dateKey])) {
                   appData.schedule_slots[dateKey] = parsedSchedule[dateKey].map(s => ({
@@ -964,12 +981,13 @@
             };
           }).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
 
-          const baseFreeze = u.freeze_details || meta.freeze_details || prevSt?.freeze_details || { is_frozen: false, from: '2026-11-01', to: '2026-11-15' };
-          const isSubFrozen = userSub && userSub.status === 'frozen';
-          const freezeDetails = {
-            ...baseFreeze,
-            is_frozen: isSubFrozen ? true : Boolean(baseFreeze.is_frozen)
+          const rawNotif = u.notification_settings || meta.notification_settings || prevSt?.notification_settings || {};
+          const resolvedNotif = {
+            booking_notify: rawNotif.booking_notify !== false,
+            sunday_checkup: rawNotif.sunday_checkup !== false,
+            monthly_inbody_photos: rawNotif.monthly_inbody_photos !== false
           };
+          const resolvedWorkoutsEnabled = Boolean(meta.workouts_enabled ?? prevSt?.workouts_enabled ?? false);
 
           const metaAnthro = (Array.isArray(u.anthropometry) ? u.anthropometry : (Array.isArray(meta.anthropometry) ? meta.anthropometry : (Array.isArray(prevSt?.anthropometry) ? prevSt.anthropometry : []))).map(normalizeAnthropometryRecord);
           const tableAnthro = anthroMap.get(userIdStr) || [];
@@ -1000,13 +1018,13 @@
             id: u.id,
             supabase_id: u.id,
             coach_id: u.coach_id || currentCoachId || null,
-            telegram_id: u.telegram_id || null,
+            telegram_id: u.telegram_id || meta.telegram_id || prevSt?.telegram_id || null,
             access_code: code,
             telegram_username: tgUsername,
             full_name: userFullName,
             avatar: u.avatar_url || meta.avatar || prevSt?.avatar || initials,
-            status: freezeDetails.is_frozen ? 'frozen' : 'active',
-            freeze_details: freezeDetails,
+            status: 'active',
+            workouts_enabled: resolvedWorkoutsEnabled,
             price: resolvedPrice,
             session_duration: dur,
             subscription: {
@@ -1019,14 +1037,14 @@
               remaining: remaining,
               payment_day: billDay,
               billing_day: billDay,
-              status: freezeDetails.is_frozen ? 'frozen' : 'active',
+              status: 'active',
               robokassa_sum: cleanSumStr,
               robokassa_url: cleanUrlStr
             },
             payment_history: Array.isArray(meta.payment_history) ? meta.payment_history : (Array.isArray(prevSt?.payment_history) ? prevSt.payment_history : []),
             medical_notes: u.medical_notes ?? meta.medical_notes ?? prevSt?.medical_notes ?? '',
             trainer_private_notes: u.trainer_private_notes ?? meta.trainer_private_notes ?? prevSt?.trainer_private_notes ?? '',
-            notification_settings: u.notification_settings || meta.notification_settings || prevSt?.notification_settings || { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+            notification_settings: resolvedNotif,
             workouts: Array.isArray(u.workouts) ? u.workouts : (Array.isArray(meta.workouts) ? meta.workouts : (Array.isArray(prevSt?.workouts) ? prevSt.workouts : [])),
             anthropometry: mergedAnthro,
             checkups: mergedCheckups,
@@ -1428,12 +1446,15 @@
 
     <header id="app-header" class="sticky top-0 z-30 bg-[#090C10]/95 backdrop-blur-md border-b border-[#30363D] px-4 py-3 safe-top flex items-center justify-between">
       <div class="flex items-center gap-2.5">
-        <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-[#10B981] to-[#00E676] flex items-center justify-center shadow-neon">
-          <i data-lucide="sparkle" class="w-5 h-5 text-[#090C10] stroke-[2.5]"></i>
+        <div class="flex items-center justify-center shrink-0">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 124 46" class="h-8 w-[80px]" aria-label="WINNIEFIT">
+            <ellipse cx="62" cy="23" rx="58" ry="19" fill="none" stroke="#00E676" stroke-width="3" />
+            <text x="62" y="28.5" text-anchor="middle" fill="#00E676" font-family="Inter, -apple-system, sans-serif" font-size="16" font-weight="900" font-style="italic" letter-spacing="0.4">WINNIEFIT</text>
+          </svg>
         </div>
         <div class="flex flex-col justify-center">
           <div class="flex items-center gap-1.5">
-            <span class="font-extrabold tracking-tight text-base text-white leading-none">STEP VALUE</span>
+            <span class="font-extrabold tracking-tight text-base text-white leading-none">Тренер Степан</span>
             <span id="header-role-badge" class="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-[#161B22] text-[#10B981] border border-[#10B981]/40 leading-none">АВТОРИЗАЦИЯ</span>
           </div>
           <p id="header-subtitle" class="text-[11px] text-[#8B949E] leading-none mt-0.5 hidden"></p>
@@ -1623,10 +1644,11 @@
       return `${d}.${m}.${y}`;
     }
 
-    function getUpcomingDays(count = 10) {
+    function getUpcomingDays(count = null) {
+      const resolvedCount = Number(count) || (typeof appData !== 'undefined' && appData && Number(appData.booking_horizon_days)) || 10;
       const base = getTodayDateObj();
       const list = [];
-      for (let i = 0; i < count; i++) {
+      for (let i = 0; i < resolvedCount; i++) {
         const d = new Date(base);
         d.setDate(base.getDate() + i);
         list.push({
@@ -1640,7 +1662,7 @@
       return list;
     }
 
-    function buildDefaultHoursForDay(startH = 9, endH = 21, closedHours = [], bookingsMap = {}) {
+    function buildDefaultHoursForDay(startH = 6, endH = 24, closedHours = [], bookingsMap = {}) {
       const slots = [];
       for (let h = startH; h < endH; h++) {
         const timeStr = `${String(h).padStart(2, '0')}:00`;
@@ -1699,7 +1721,68 @@ const TELEGRAM_STORAGE_CONFIG = {
       channelId: '-1004321392864'
     };
 
-    function compressImageToBlobAndDataUrl(fileOrBlob, maxDim = 1280, quality = 0.75) {
+    async function sendTelegramClientNotification(student, messageText, settingKey = 'booking_notify') {
+      try {
+        if (!student || !student.telegram_id) return false;
+        const chatId = Number(student.telegram_id);
+        if (!chatId || isNaN(chatId)) return false;
+
+        const settings = student.notification_settings || {};
+        if (settingKey && settings[settingKey] === false) {
+          return false;
+        }
+
+        const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_STORAGE_CONFIG.botToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: messageText,
+            parse_mode: 'HTML'
+          })
+        });
+        const result = await response.json();
+        return Boolean(result && result.ok);
+      } catch (err) {
+        console.warn('Не удалось отправить уведомление клиенту в Telegram:', err);
+        return false;
+      }
+    }
+
+    function escapeTgHtml(str) {
+      return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function buildTelegramEventCard({ title, dateTimeLine, quoteLines = [] }) {
+      const quoteBlock = quoteLines.length > 0
+        ? `\n\n<blockquote expandable>${quoteLines.join('\n')}</blockquote>`
+        : '';
+      return `${title}${dateTimeLine ? `\n\n🕒 ${dateTimeLine}\nПо вашей таймзоне: Europe/Moscow` : ''}${quoteBlock}`;
+    }
+
+    async function sendTelegramTrainerNotification(messageText) {
+      try {
+        const chatId = Number(appData?.trainer_profile?.telegram_id || 0);
+        if (!chatId || isNaN(chatId)) return false;
+
+        const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_STORAGE_CONFIG.botToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: messageText,
+            parse_mode: 'HTML'
+          })
+        });
+        const result = await response.json();
+        return Boolean(result && result.ok);
+      } catch (err) {
+        console.warn('Не удалось отправить уведомление тренеру в Telegram:', err);
+        return false;
+      }
+    }
+
+    function compressImageToBlobAndDataUrl(fileOrBlob, maxDim = 640, quality = 0.58) {
       return new Promise((resolve, reject) => {
         if (!fileOrBlob || !(fileOrBlob instanceof Blob)) {
           reject(new Error('Некорректный файл изображения'));
@@ -1745,7 +1828,7 @@ const TELEGRAM_STORAGE_CONFIG = {
     async function uploadMediaToTelegram(fileOrBlob, captionText = '') {
       let payloadBlob = fileOrBlob;
       if (fileOrBlob instanceof File || (fileOrBlob instanceof Blob && (fileOrBlob.type !== 'image/jpeg' || fileOrBlob.size > 10 * 1024 * 1024))) {
-        const compressed = await compressImageToBlobAndDataUrl(fileOrBlob, 1280, 0.75);
+        const compressed = await compressImageToBlobAndDataUrl(fileOrBlob, 640, 0.58);
         payloadBlob = compressed.blob;
       }
 
@@ -2015,15 +2098,17 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
       }
     }
     function buildInitialSeedData() {
-      const days = getUpcomingDays(10);
+      const horizonDays = 10;
+      const days = getUpcomingDays(horizonDays);
       const scheduleSlots = {};
       days.forEach(dayObj => {
-        scheduleSlots[dayObj.iso] = buildDefaultHoursForDay(9, 21, [], {});
+        scheduleSlots[dayObj.iso] = buildDefaultHoursForDay(6, 24, [], {});
       });
 
       return {
         current_role: null,
         current_student_id: null,
+        booking_horizon_days: horizonDays,
         trainer_profile: {
           master_pin: 'STEP878',
           full_name: 'Степан',
@@ -2077,11 +2162,12 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
 
     function migrateLoadedData() {
       if (!appData || !appData.students) return;
-      const upcoming = getUpcomingDays(10);
+      if (!appData.booking_horizon_days) appData.booking_horizon_days = 10;
+      const upcoming = getUpcomingDays();
       if (!appData.schedule_slots) appData.schedule_slots = {};
       upcoming.forEach(d => {
         if (!appData.schedule_slots[d.iso]) {
-          appData.schedule_slots[d.iso] = buildDefaultHoursForDay(9, 21, [], {});
+          appData.schedule_slots[d.iso] = buildDefaultHoursForDay(6, 24, [], {});
         }
       });
 
@@ -2196,14 +2282,14 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
         full_name: 'Атлет',
         avatar: 'АТ',
         status: 'active',
+        workouts_enabled: false,
         price: 0,
         session_duration: 60,
-        freeze_details: { is_frozen: false, from: '', to: '' },
         subscription: { id: null, price: 0, total: 8, total_sessions: 8, used: 0, used_sessions: 0, remaining: 8, payment_day: 1, billing_day: 1, robokassa_sum: '0 ₽', robokassa_url: '' },
         payment_history: [],
         medical_notes: '',
         trainer_private_notes: '',
-        notification_settings: { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+        notification_settings: { booking_notify: true, sunday_checkup: true, monthly_inbody_photos: true },
         workouts: [],
         anthropometry: [],
         checkups: [],
@@ -2493,9 +2579,10 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
         if (tgUser) {
           const tgUsername = String(tgUser.username || '').trim().replace(/^@/, '').toLowerCase();
           const trainerUsername = String(appData?.trainer_profile?.telegram_username || '').trim().replace(/^@/, '').toLowerCase();
-          if (tgUsername && trainerUsername && tgUsername === trainerUsername) {
+          const trainerTgId = Number(appData?.trainer_profile?.telegram_id || 0);
+          if ((tgUser.id && trainerTgId && Number(tgUser.id) === trainerTgId) || (tgUsername && trainerUsername && tgUsername === trainerUsername)) {
             appData.current_role = 'trainer';
-            saveSessionToTelegramCloud('trainer', '', '');
+            saveSessionToTelegramCloud('trainer', '', appData?.trainer_profile?.master_pin || 'STEP878');
             return true;
           }
 
@@ -2527,7 +2614,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
       currentUser = null;
       currentSubscription = null;
       renderApp();
-      showToast('Выберите роль и профиль для входа');
+      showToast('Вы вышли из аккаунта. Введите код доступа для входа');
     }
 
     function selectOnboardingMode(mode) {
@@ -2545,71 +2632,77 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
       }
     }
 
-    function toggleTrainerPinVisibility() {
-      const input = document.getElementById('input-trainer-pin');
-      const icon = document.getElementById('eye-icon-trainer-pin');
-      if (!input) return;
+    async function submitUnifiedAccessCode() {
+      const input = document.getElementById('input-access-code');
+      const val = (input ? input.value : '').trim().toUpperCase();
 
-      if (input.type === 'password') {
-        input.type = 'text';
-        if (icon) icon.setAttribute('data-lucide', 'eye-off');
-      } else {
-        input.type = 'password';
-        if (icon) icon.setAttribute('data-lucide', 'eye');
-      }
-      if (window.lucide && typeof lucide.createIcons === 'function') {
-        const rootContainer = (icon && icon.parentElement) || document.getElementById('app-main');
-        if (rootContainer) lucide.createIcons({ root: rootContainer });
-      }
-    }
-
-    async function submitTrainerPin() {
-      const input = document.getElementById('input-trainer-pin');
-      const val = (input ? input.value : '').trim();
-      const expected = (appData?.trainer_profile?.master_pin || 'STEP878').trim();
+      if (input) input.blur();
 
       if (!val) {
-        showToast('Введите пароль тренера', 'error');
+        showToast('Введите код доступа', 'error');
         return;
       }
 
-      if (val === expected || val === 'STEP878') {
+      const expectedMasterPin = String(appData?.trainer_profile?.master_pin || 'STEP878').trim().toUpperCase();
+      const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
+
+      if (val === expectedMasterPin || val === 'STEP878') {
         triggerHaptic('success');
         appData.current_role = 'trainer';
         uiState.onboardingMode = null;
-        saveSessionToTelegramCloud('trainer', '', '');
-        renderApp();
-        showToast(`Добро пожаловать, ${appData.trainer_profile.full_name}!`);
-        try {
+        saveSessionToTelegramCloud('trainer', '', val);
+
+        if (tgUser && tgUser.id) {
+          appData.trainer_profile.telegram_id = Number(tgUser.id);
           Promise.resolve().then(async () => {
             try {
-              await syncAllStudentsFromSupabase();
-            } catch (bgErr) {
-              console.warn('Фоновая синхронизация тренера:', bgErr);
+              await waitForSupabaseClient();
+              if (supabaseClient) {
+                const coachUuid = getCoachUuid();
+                if (coachUuid) {
+                  await supabaseClient
+                    .from('users')
+                    .update({ telegram_id: Number(tgUser.id) })
+                    .eq('id', coachUuid);
+                } else {
+                  const { data: coaches } = await supabaseClient
+                    .from('users')
+                    .select('id')
+                    .in('role', ['coach', 'trainer'])
+                    .limit(1);
+                  if (Array.isArray(coaches) && coaches.length > 0) {
+                    appData.trainer_profile.supabase_id = coaches[0].id;
+                    currentCoachId = coaches[0].id;
+                    await supabaseClient
+                      .from('users')
+                      .update({ telegram_id: Number(tgUser.id) })
+                      .eq('id', coaches[0].id);
+                  }
+                }
+              }
+            } catch (coachTgErr) {
+              console.warn('Не удалось привязать telegram_id тренера:', coachTgErr);
             }
           });
-        } catch (err) {
-          console.warn('Изолированная ошибка запуска синхронизации:', err);
         }
-      } else {
-        showToast('Неверный пароль тренера', 'error');
-      }
-    }
 
-    async function submitStudentCode() {
-      const input = document.getElementById('input-student-code');
-      const val = (input ? input.value : '').trim().toUpperCase();
-
-      if (!val) {
-        showToast('Введите персональный код', 'error');
+        renderApp();
+        showToast(`Добро пожаловать, ${appData.trainer_profile.full_name}!`);
+        Promise.resolve().then(async () => {
+          try {
+            await syncAllStudentsFromSupabase();
+          } catch (bgErr) {
+            console.warn('Фоновая синхронизация тренера:', bgErr);
+          }
+        });
         return;
       }
 
       await syncAllStudentsFromSupabase();
-      let student = (appData.students || []).find(s => (s.access_code || '').trim().toUpperCase() === val);
+      const student = (appData.students || []).find(s => (s.access_code || '').trim().toUpperCase() === val);
 
       if (!student) {
-        showToast('Подопечный с таким кодом не найден', 'error');
+        showToast('Неверный код доступа', 'error');
         return;
       }
 
@@ -2618,86 +2711,78 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
       appData.current_student_id = student.id;
       uiState.onboardingMode = null;
 
+      if (tgUser && tgUser.id && Number(student.telegram_id) !== Number(tgUser.id)) {
+        student.telegram_id = Number(tgUser.id);
+        Promise.resolve().then(async () => {
+          try {
+            await waitForSupabaseClient();
+            const studentUuid = toValidUuidOrNull(student.supabase_id || student.id);
+            if (supabaseClient && studentUuid) {
+              await supabaseClient
+                .from('users')
+                .update({ telegram_id: Number(tgUser.id) })
+                .eq('id', studentUuid);
+            }
+            await syncStudentToCloud(student);
+          } catch (stTgErr) {
+            console.warn('Не удалось привязать telegram_id ученика:', stTgErr);
+          }
+        });
+      }
+
       saveSessionToTelegramCloud('student', student.id, student.access_code);
       renderApp();
       showToast(`Добро пожаловать, ${student.full_name || 'Атлет'}!`);
     }
 
-function renderOnboardingScreen() {
+    function renderOnboardingScreen() {
       return `
         <div class="min-h-[78vh] flex flex-col justify-center py-6 animate-fade">
           <div class="text-center mb-7">
-            <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-[#10B981] to-[#00E676] mx-auto flex items-center justify-center shadow-neonStrong mb-4">
-              <i data-lucide="activity" class="w-9 h-9 text-[#090C10] stroke-[2.5]"></i>
+            <div class="mx-auto mb-5 flex items-center justify-center">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 86" class="w-full max-w-[220px] h-auto" aria-label="WINNIEFIT">
+                <ellipse cx="120" cy="43" rx="112" ry="35" fill="none" stroke="#F8FF70" stroke-width="4.5" />
+                <text x="120" y="53" text-anchor="middle" fill="#F8FF70" font-family="Inter, -apple-system, sans-serif" font-size="30" font-weight="900" font-style="italic" letter-spacing="0.8">WINNIEFIT</text>
+              </svg>
             </div>
-            <div class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#161B22] border border-[#10B981]/40 text-[#00E676] text-[11px] font-semibold mb-2">
-              <span>CYBER-FITNESS ECOSYSTEM</span>
-            </div>
-            <h1 class="text-2xl font-extrabold tracking-tight text-white">STEP VALUE</h1>
-            <p class="text-xs text-[#8B949E] mt-1 max-w-[300px] mx-auto">
+            <h1 class="text-2xl font-extrabold tracking-tight text-white">Тренер Степан</h1>
+            <p class="text-xs text-[#8B949E] mt-1.5 max-w-[300px] mx-auto">
               Персональный трекер прогресса и расписания
             </p>
           </div>
 
-          <div class="grid grid-cols-2 gap-3.5 mb-5">
-        <button onclick="selectOnboardingMode('student_pin')" class="group p-5 rounded-2xl bg-[#161B22] border ${uiState.onboardingMode === 'student_pin' ? 'border-[#00E676] shadow-neon' : 'border-[#30363D] hover:border-[#10B981]'} transition-all flex flex-col items-center justify-center text-center">
-          <div class="w-12 h-12 rounded-2xl bg-[#0D1117] border ${uiState.onboardingMode === 'student_pin' ? 'border-[#00E676]' : 'border-[#30363D] group-hover:border-[#10B981]'} flex items-center justify-center mb-3 transition-all">
-            <i data-lucide="dumbbell" class="w-6 h-6 text-[#10B981]"></i>
+          <div class="mb-4">
+            <button onclick="selectOnboardingMode('student_pin')" class="w-full py-5 px-6 rounded-2xl bg-gradient-to-b from-[#1C232D] to-[#161B22] hover:from-[#222B37] hover:to-[#1B222C] border ${uiState.onboardingMode === 'student_pin' ? 'border-[#00E676] shadow-neon' : 'border-[#30363D] hover:border-[#10B981]'} transition-all flex items-center justify-center gap-3 active:scale-[0.985]">
+              <i data-lucide="log-in" class="w-6 h-6 text-[#00E676] stroke-[2.4]"></i>
+              <span class="text-xl font-extrabold uppercase tracking-[0.16em] text-white leading-none">Вход</span>
+            </button>
           </div>
-          <div class="text-sm font-bold text-white tracking-wide">Я Ученик</div>
-        </button>
-
-        <button onclick="selectOnboardingMode('trainer_pin')" class="group p-5 rounded-2xl bg-[#161B22] border ${uiState.onboardingMode === 'trainer_pin' ? 'border-[#00E676] shadow-neon' : 'border-[#30363D] hover:border-[#10B981]'} transition-all flex flex-col items-center justify-center text-center">
-          <div class="w-12 h-12 rounded-2xl bg-[#0D1117] border ${uiState.onboardingMode === 'trainer_pin' ? 'border-[#00E676]' : 'border-[#30363D] group-hover:border-[#10B981]'} flex items-center justify-center mb-3 transition-all">
-            <i data-lucide="shield-check" class="w-6 h-6 text-[#10B981]"></i>
-          </div>
-          <div class="text-sm font-bold text-white tracking-wide">Я Тренер</div>
-        </button>
-      </div>
 
           ${uiState.onboardingMode === 'student_pin' ? `
             <div class="bg-[#161B22] border border-[#10B981]/60 rounded-2xl p-4 shadow-neon space-y-3 animate-fade">
               <div class="flex items-center justify-between">
                 <span class="text-xs font-bold text-white flex items-center gap-1.5">
                   <i data-lucide="key-round" class="w-4 h-4 text-[#00E676]"></i>
-                  Вход по персональному коду подопечного
+                  Авторизация по коду доступа
                 </span>
                 <span class="text-[11px] text-[#8B949E]">Навсегда в памяти</span>
               </div>
-              <input id="input-student-code" type="text" value="" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" placeholder="Введите персональный код" oninput="this.value = this.value.toUpperCase()" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-4 py-3 text-sm font-bold text-white uppercase placeholder:normal-case placeholder:font-normal placeholder:text-[#484F58] tracking-wider outline-none select-text transition" />              <button onclick="submitStudentCode()" class="mt-3 w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider shadow-neon active:scale-[0.99] transition">
-                Войти в кабинет атлета
+              <input id="input-access-code" type="text" value="" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" placeholder="Введите код доступа" oninput="this.value = this.value.toUpperCase()" onkeydown="if(event.key==='Enter'){event.preventDefault();submitUnifiedAccessCode();}" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-4 py-3 text-sm font-bold text-white uppercase placeholder:normal-case placeholder:font-normal placeholder:text-[#484F58] tracking-wider outline-none select-text transition" />
+              <button onclick="submitUnifiedAccessCode()" class="mt-2 w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider shadow-neon active:scale-[0.99] transition">
+                Войти
               </button>
             </div>
           ` : ''}
-
-          ${uiState.onboardingMode === 'trainer_pin' ? `
-            <div class="bg-[#161B22] border border-[#30363D] focus-within:border-[#00E676] rounded-2xl p-4 shadow-neon space-y-3 animate-fade">
-              <div class="flex items-center justify-between">
-                <span class="text-xs font-semibold text-white flex items-center gap-1.5">
-                  <i data-lucide="lock" class="w-4 h-4 text-[#00E676]"></i>
-                  Вход для наставника
-                </span>
-                <span class="text-[11px] text-[#8B949E]">Только для тренера</span>
-              </div>
-              <div class="relative flex items-center">
-                <input id="input-trainer-pin" type="password" value="" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" placeholder="Введите пароль тренера" oninput="this.value = this.value.toUpperCase()" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-4 py-3 text-sm font-bold text-white uppercase placeholder:normal-case placeholder:font-normal placeholder:text-[#484F58] tracking-wider outline-none select-text transition pr-10" />
-                <button type="button" onclick="toggleTrainerPinVisibility()" class="absolute right-3 p-1.5 text-[#8B949E] hover:text-[#00E676] transition flex items-center justify-center focus:outline-none" title="Показать / скрыть пароль">
-                  <i id="eye-icon-trainer-pin" data-lucide="eye" class="w-4 h-4"></i>
-                </button>
-              </div>
-              <button onclick="submitTrainerPin()" class="mt-2 w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-bold text-xs uppercase tracking-wider shadow-neon active:scale-[0.99] transition">
-                Войти в панель тренера
-              </button>
-            </div>
-          ` : ''}
-
-
         </div>
       `;
     }
 
     function setStudentTab(tabName) {
       triggerHaptic('light');
+      const st = getCurrentStudent();
+      if (tabName === 'workouts' && !Boolean(st && st.workouts_enabled)) {
+        tabName = 'booking';
+      }
       uiState.studentTab = tabName;
       uiState.workoutEditorOpen = false;
       uiState.studentReportSubscreen = null;
@@ -2799,10 +2884,7 @@ function renderOnboardingScreen() {
       if (!student) return;
       if (!Array.isArray(student.active_bookings)) student.active_bookings = [];
 
-      if (student.freeze_details && student.freeze_details.is_frozen) {
-        showToast('Ваш абонемент на паузе (Заморозка). Отключите паузу в Профиле для записи.', 'error');
-        return;
-      }
+
 
       const daySlots = appData.schedule_slots[isoDate] || [];
       const startIndex = daySlots.findIndex(s => s.time === startTime);
@@ -2908,6 +2990,20 @@ function renderOnboardingScreen() {
           saveAppData();
           triggerHaptic('success');
           showToast(`Запись перенесена на ${formatHumanDate(isoDate)} в ${startTime}. Баланс сохранён: ${student.subscription.remaining} из ${student.subscription.total}!`);
+          const trainerName = escapeTgHtml(appData?.trainer_profile?.full_name || 'Степан');
+          const studentName = escapeTgHtml(student.full_name || 'Ученик');
+          const balanceStr = `${student.subscription.remaining} из ${student.subscription.total}`;
+          const rescheduleHtml = buildTelegramEventCard({
+            title: `🔄 <b>Тренировка перенесена (${studentName})</b>`,
+            dateTimeLine: `${formatHumanDate(isoDate)}, ${startTime}`,
+            quoteLines: [
+              `👥 Участники: ${trainerName} и ${studentName}`,
+              `↩️ Было: ${formatHumanDate(oldReschedDate)}, ${oldReschedTime}`,
+              `🎟 Остаток по абонементу: ${balanceStr}`
+            ]
+          });
+          sendTelegramClientNotification(student, rescheduleHtml, 'booking_notify');
+          sendTelegramTrainerNotification(rescheduleHtml);
           renderApp();
           return;
         }
@@ -2974,6 +3070,19 @@ function renderOnboardingScreen() {
               persistStudentToSupabase(activeStudent)
             ]);
             saveAppData();
+            const trainerName = escapeTgHtml(appData?.trainer_profile?.full_name || 'Степан');
+            const studentName = escapeTgHtml(activeStudent.full_name || 'Ученик');
+            const balanceStr = `${activeStudent.subscription.remaining} из ${activeStudent.subscription.total}`;
+            const bookedHtml = buildTelegramEventCard({
+              title: `✨ <b>Запланирована тренировка (${studentName})</b>`,
+              dateTimeLine: `${formatHumanDate(isoDate)}, ${startTime}`,
+              quoteLines: [
+                `👥 Участники: ${trainerName} и ${studentName}`,
+                `🎟 Остаток по абонементу: ${balanceStr}`
+              ]
+            });
+            sendTelegramClientNotification(activeStudent, bookedHtml, 'booking_notify');
+            sendTelegramTrainerNotification(bookedHtml);
           } else {
             // В случае сетевой ошибки возвращаем слот и занятие назад
             activeStudent.active_bookings = activeStudent.active_bookings.filter(b => b.id !== tempId);
@@ -3017,6 +3126,19 @@ function renderOnboardingScreen() {
   saveAppData();
   triggerHaptic('warning');
   showToast('Отмена брони... Занятие возвращено на баланс');
+  const trainerName = escapeTgHtml(appData?.trainer_profile?.full_name || 'Степан');
+  const studentName = escapeTgHtml(student.full_name || 'Ученик');
+  const balanceStr = student.subscription ? `${student.subscription.remaining} из ${student.subscription.total}` : 'обновлён';
+  const cancelHtml = buildTelegramEventCard({
+    title: `❌ <b>Тренировка отменена (${studentName})</b>`,
+    dateTimeLine: `${formatHumanDate(target.date)}, ${target.time}`,
+    quoteLines: [
+      `👥 Участники: ${trainerName} и ${studentName}`,
+      `♻️ Занятие возвращено на баланс: ${balanceStr}`
+    ]
+  });
+  sendTelegramClientNotification(student, cancelHtml, 'booking_notify');
+  sendTelegramTrainerNotification(cancelHtml);
   renderApp();
 
   // 3. Фоновая синхронизация с базой (DELETE из bookings + декремент used_sessions в subscriptions)
@@ -3090,12 +3212,20 @@ function renderOnboardingScreen() {
       const todayDayNum = new Date().getDate();
       const isPaymentDayToday = Number(sub.payment_day) === Number(todayDayNum);
 
-      const upcomingDays = getUpcomingDays(10);
-      if (!upcomingDays.some(d => d.iso === uiState.selectedBookingDate)) {
+      const allUpcomingDays = getUpcomingDays();
+      const upcomingDays = allUpcomingDays.filter(d => {
+        const daySlots = (appData.schedule_slots && appData.schedule_slots[d.iso]) || [];
+        const hasOpenFreeSlot = daySlots.some(s => s.is_open && !s.booked_by);
+        const hasOwnBooking = activeBookings.some(b => b.date === d.iso);
+        return hasOpenFreeSlot || hasOwnBooking;
+      });
+      if (upcomingDays.length > 0 && !upcomingDays.some(d => d.iso === uiState.selectedBookingDate)) {
         uiState.selectedBookingDate = upcomingDays[0].iso;
       }
 
-      const fittableSlots = computeFittableSlotsForStudent(uiState.selectedBookingDate, student.session_duration || 60);
+      const fittableSlots = upcomingDays.length > 0
+        ? computeFittableSlotsForStudent(uiState.selectedBookingDate, student.session_duration || 60)
+        : [];
       const isSelectedToday = uiState.selectedBookingDate === formatISO(getTodayDateObj());
 
       return `
@@ -3205,64 +3335,76 @@ function renderOnboardingScreen() {
             </div>
           `}
 
-          <div id="student-day-scroller" class="space-y-2">
-            <div class="flex items-center justify-between">
-              <h3 class="text-xs font-bold uppercase tracking-wider text-[#8B949E]">Расписание тренера (10 дней)</h3>
-              <span class="text-[11px] text-[#10B981] font-semibold">${formatHumanDate(uiState.selectedBookingDate)}</span>
-            </div>
-            <div class="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-              ${upcomingDays.map(d => {
-                const isSelected = d.iso === uiState.selectedBookingDate;
-                const bookingsOnDay = activeBookings.filter(b => b.date === d.iso).length;
-                return `
-                  <button onclick="selectStudentBookingDate('${d.iso}')" class="shrink-0 w-[62px] py-2.5 rounded-xl border ${isSelected ? 'bg-[#10B981] text-[#090C10] border-[#00E676] shadow-neon font-extrabold' : 'bg-[#161B22] text-white border-[#30363D] hover:bg-[#1F242C]'} flex flex-col items-center justify-center transition relative">
-                    <span class="text-[10px] uppercase ${isSelected ? 'text-[#090C10]/80 font-bold' : 'text-[#8B949E]'}">${d.isToday ? 'Сег' : d.dayShort}</span>
-                    <span class="text-base font-extrabold leading-tight my-0.5">${d.dayNum}</span>
-                    <span class="text-[10px] ${isSelected ? 'text-[#090C10]/80 font-semibold' : 'text-[#8B949E]'}">${d.monthShort}</span>
-                    ${bookingsOnDay > 0 ? `<span class="w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-[#090C10]' : 'bg-[#00E676]'} mt-1"></span>` : ''}
-                  </button>
-                `;
-              }).join('')}
-            </div>
-          </div>
-
-          <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-4 space-y-3">
-            <div class="flex items-center justify-between">
-              <div>
-                <h4 class="text-sm font-bold text-white">Свободные окна для записи</h4>
-                <p class="text-[11px] text-[#8B949E]">Длительность: <span class="text-white font-semibold">${formatDurationLabel(student.session_duration)}</span></p>
+          ${upcomingDays.length > 0 ? `
+            <div id="student-day-scroller" class="space-y-2">
+              <div class="flex items-center justify-between">
+                <h3 class="text-xs font-bold uppercase tracking-wider text-[#8B949E]">Расписание тренера</h3>
+                <span class="text-[11px] text-[#10B981] font-semibold">${formatHumanDate(uiState.selectedBookingDate)}</span>
               </div>
-              <span class="text-xs font-bold px-2.5 py-1 rounded-lg bg-[#0D1117] border border-[#30363D] text-[#00E676]">
-                ${fittableSlots.length} доступно
-              </span>
+              <div class="flex gap-2 overflow-x-auto no-scrollbar pb-1">
+                ${upcomingDays.map(d => {
+                  const isSelected = d.iso === uiState.selectedBookingDate;
+                  const bookingsOnDay = activeBookings.filter(b => b.date === d.iso).length;
+                  return `
+                    <button onclick="selectStudentBookingDate('${d.iso}')" class="shrink-0 w-[62px] py-2.5 rounded-xl border ${isSelected ? 'bg-[#10B981] text-[#090C10] border-[#00E676] shadow-neon font-extrabold' : 'bg-[#161B22] text-white border-[#30363D] hover:bg-[#1F242C]'} flex flex-col items-center justify-center transition relative">
+                      <span class="text-[10px] uppercase ${isSelected ? 'text-[#090C10]/80 font-bold' : 'text-[#8B949E]'}">${d.isToday ? 'Сег' : d.dayShort}</span>
+                      <span class="text-base font-extrabold leading-tight my-0.5">${d.dayNum}</span>
+                      <span class="text-[10px] ${isSelected ? 'text-[#090C10]/80 font-semibold' : 'text-[#8B949E]'}">${d.monthShort}</span>
+                      ${bookingsOnDay > 0 ? `<span class="w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-[#090C10]' : 'bg-[#00E676]'} mt-1"></span>` : ''}
+                    </button>
+                  `;
+                }).join('')}
+              </div>
             </div>
 
-            ${fittableSlots.length > 0 ? `
-              <div class="grid grid-cols-2 gap-2.5 pt-1">
-                ${fittableSlots.map(slot => `
-                  <button onclick="bookStudentSlot('${uiState.selectedBookingDate}', '${slot.startTime}')" class="p-3 rounded-xl bg-[#0D1117] hover:bg-[#1F242C] border border-[#30363D] hover:border-[#00E676] text-left transition group flex items-center justify-between">
-                    <div>
-                      <div class="text-sm font-extrabold text-white group-hover:text-[#00E676] transition">${slot.startTime}</div>
-                      <div class="text-[11px] text-[#8B949E]">до ${slot.endTime} (${formatDurationLabel(slot.duration)})</div>
-                    </div>
-                    <div class="w-7 h-7 rounded-lg bg-[#161B22] group-hover:bg-[#10B981] text-[#10B981] group-hover:text-[#090C10] flex items-center justify-center transition">
-                      <i data-lucide="plus" class="w-4 h-4 stroke-[2.5]"></i>
-                    </div>
-                  </button>
-                `).join('')}
+            <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-4 space-y-3">
+              <div class="flex items-center justify-between">
+                <div>
+                  <h4 class="text-sm font-bold text-white">Свободные окна для записи</h4>
+                  <p class="text-[11px] text-[#8B949E]">Длительность: <span class="text-white font-semibold">${formatDurationLabel(student.session_duration)}</span></p>
+                </div>
+                <span class="text-xs font-bold px-2.5 py-1 rounded-lg bg-[#0D1117] border border-[#30363D] text-[#00E676]">
+                  ${fittableSlots.length} доступно
+                </span>
               </div>
-            ` : `
-              <div class="py-8 px-4 text-center space-y-2 bg-[#0D1117] rounded-xl border border-[#30363D]">
-                <i data-lucide="clock-alert" class="w-8 h-8 text-[#8B949E] mx-auto"></i>
-                <p class="text-xs font-bold text-white">
-                  ${isSelectedToday
-                    ? 'На сегодня доступных окон больше нет (с учётом прошедшего времени и 1-часового буфера)'
-                    : `На выбранный день нет свободных окон под сессию ${formatDurationLabel(student.session_duration)}`}
-                </p>
-                <p class="text-[11px] text-[#8B949E]">Выберите следующий день в календаре выше для записи</p>
+
+              ${fittableSlots.length > 0 ? `
+                <div class="grid grid-cols-2 gap-2.5 pt-1">
+                  ${fittableSlots.map(slot => `
+                    <button onclick="bookStudentSlot('${uiState.selectedBookingDate}', '${slot.startTime}')" class="p-3 rounded-xl bg-[#0D1117] hover:bg-[#1F242C] border border-[#30363D] hover:border-[#00E676] text-left transition group flex items-center justify-between">
+                      <div>
+                        <div class="text-sm font-extrabold text-white group-hover:text-[#00E676] transition">${slot.startTime}</div>
+                        <div class="text-[11px] text-[#8B949E]">до ${slot.endTime} (${formatDurationLabel(slot.duration)})</div>
+                      </div>
+                      <div class="w-7 h-7 rounded-lg bg-[#161B22] group-hover:bg-[#10B981] text-[#10B981] group-hover:text-[#090C10] flex items-center justify-center transition">
+                        <i data-lucide="plus" class="w-4 h-4 stroke-[2.5]"></i>
+                      </div>
+                    </button>
+                  `).join('')}
+                </div>
+              ` : `
+                <div class="py-8 px-4 text-center space-y-2 bg-[#0D1117] rounded-xl border border-[#30363D]">
+                  <i data-lucide="clock-alert" class="w-8 h-8 text-[#8B949E] mx-auto"></i>
+                  <p class="text-xs font-bold text-white">
+                    ${isSelectedToday
+                      ? 'На сегодня доступных окон больше нет (с учётом прошедшего времени и 1-часового буфера)'
+                      : `На выбранный день нет свободных окон под сессию ${formatDurationLabel(student.session_duration)}`}
+                  </p>
+                  <p class="text-[11px] text-[#8B949E]">Выберите следующий день в календаре выше для записи</p>
+                </div>
+              `}
+            </div>
+          ` : `
+            <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-6 text-center space-y-2.5">
+              <div class="w-12 h-12 rounded-2xl bg-[#0D1117] border border-[#30363D] mx-auto flex items-center justify-center text-[#8B949E]">
+                <i data-lucide="calendar-off" class="w-6 h-6"></i>
               </div>
-            `}
-          </div>
+              <h4 class="text-sm font-bold text-white">Свободных дней для записи пока нет</h4>
+              <p class="text-xs text-[#8B949E] max-w-[260px] mx-auto">
+                Тренер ещё не открыл доступные окна на ближайший период. Попробуйте заглянуть позже или напишите тренеру в Telegram.
+              </p>
+            </div>
+          `}
         </div>
       `;
     }
@@ -4050,7 +4192,7 @@ function renderOnboardingScreen() {
       const file = event.target.files && event.target.files[0];
       if (!file || !uiState.pendingPhotoSlotKey) return;
       try {
-        const { blob: compressedBlob, dataUrl: compressedDataUrl } = await compressImageToBlobAndDataUrl(file, 1280, 0.75);
+        const { blob: compressedBlob, dataUrl: compressedDataUrl } = await compressImageToBlobAndDataUrl(file, 640, 0.58);
         const student = getCurrentStudent();
         if (!student) return;
         if (!Array.isArray(student.photo_reports) || student.photo_reports.length === 0) {
@@ -4840,60 +4982,7 @@ function renderOnboardingScreen() {
       showToast(`День выставления счёта сохранён в базе: ${newDay}-е число месяца`);
     }
 
-    async function toggleStudentFreezeStatus() {
-      const student = getCurrentStudent();
-      if (!student) return;
-      if (!student.freeze_details) student.freeze_details = { is_frozen: false, from: '2026-11-01', to: '2026-11-15' };
-      const fromEl = document.getElementById('freeze-from');
-      const toEl = document.getElementById('freeze-to');
-      if (fromEl) student.freeze_details.from = fromEl.value;
-      if (toEl) student.freeze_details.to = toEl.value;
 
-      student.freeze_details.is_frozen = !student.freeze_details.is_frozen;
-      student.status = student.freeze_details.is_frozen ? 'frozen' : 'active';
-      if (student.subscription) student.subscription.status = student.status;
-
-      await waitForSupabaseClient();
-      const studentUuid = toValidUuidOrNull(student.supabase_id || student.id || (currentUser && currentUser.id));
-      if (supabaseClient && studentUuid) {
-        try {
-          const subUuid = toValidUuidOrNull(student.subscription && student.subscription.id);
-          if (subUuid) {
-            await supabaseClient
-              .from('subscriptions')
-              .update({ status: student.status })
-              .eq('id', subUuid);
-          } else {
-            await supabaseClient
-              .from('subscriptions')
-              .update({ status: student.status })
-              .eq('student_id', studentUuid);
-          }
-        } catch (freezeErr) {
-          console.warn('Ошибка обновления статуса заморозки в subscriptions:', freezeErr);
-        }
-      }
-
-      await persistStudentToSupabase(student);
-      renderApp();
-      triggerHaptic('success');
-      showToast(student.freeze_details.is_frozen
-        ? `Режим заморозки включён до ${formatDotDate(student.freeze_details.to)}`
-        : 'Заморозка снята! Статус «Активен» восстановлен.');
-    }
-
-    async function updateFreezeDates() {
-      const student = getCurrentStudent();
-      if (!student) return;
-      if (!student.freeze_details) student.freeze_details = { is_frozen: false, from: '2026-11-01', to: '2026-11-15' };
-      const fromEl = document.getElementById('freeze-from');
-      const toEl = document.getElementById('freeze-to');
-      if (fromEl) student.freeze_details.from = fromEl.value;
-      if (toEl) student.freeze_details.to = toEl.value;
-      await persistStudentToSupabase(student);
-      renderApp();
-      showToast('Даты отпуска/заморозки сохранены в базе');
-    }
 
     async function saveStudentMedicalNotes() {
       const student = getCurrentStudent();
@@ -4919,15 +5008,18 @@ function renderOnboardingScreen() {
       showToast('Настройки уведомлений в Telegram сохранены');
     }
 
-    // П.15: Сетка дат заморозки в Профиле (h-auto, p-4 pb-5, grid grid-cols-2 gap-3 mt-3 w-full) и 24ч окно оплаты
     function renderStudentProfileTab() {
       const student = getCurrentStudent() || getFallbackStudent();
       if (!student.subscription) student.subscription = { total: 8, remaining: 8, used: 0, payment_day: 1, robokassa_sum: '0 ₽', robokassa_url: '' };
-      if (!student.freeze_details) student.freeze_details = { is_frozen: false, from: '', to: '' };
-      if (!student.notification_settings) student.notification_settings = { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true };
+      if (!student.notification_settings) {
+        student.notification_settings = { booking_notify: true, sunday_checkup: true, monthly_inbody_photos: true };
+      }
       const sub = student.subscription;
-      const fr = student.freeze_details;
-      const notif = student.notification_settings;
+      const notif = {
+        booking_notify: student.notification_settings.booking_notify !== false,
+        sunday_checkup: student.notification_settings.sunday_checkup !== false,
+        monthly_inbody_photos: student.notification_settings.monthly_inbody_photos !== false
+      };
       const todayDayNum = new Date().getDate();
       const isPaymentDayToday = Number(sub.payment_day) === Number(todayDayNum);
 
@@ -4944,8 +5036,8 @@ function renderOnboardingScreen() {
                   <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-[#0D1117] border border-[#30363D] text-[#00E676]">${student.access_code}</span>
                 </div>
                 <p class="text-xs text-[#8B949E] mt-0.5">Подопечный • Тренер: <strong class="text-white">${appData.trainer_profile.full_name}</strong></p>
-                <span class="inline-block mt-1 text-[11px] font-bold px-2 py-0.5 rounded ${fr.is_frozen ? 'bg-amber-500/20 text-amber-300' : 'bg-[#10B981]/20 text-[#00E676]'}">
-                  ${fr.is_frozen ? `На паузе до ${formatDotDate(fr.to)}` : 'Статус: Активен'}
+                <span class="inline-block mt-1 text-[11px] font-bold px-2 py-0.5 rounded bg-[#10B981]/20 text-[#00E676]">
+                  Статус: Активен
                 </span>
               </div>
             </div>
@@ -5005,24 +5097,44 @@ function renderOnboardingScreen() {
             </div>
           </div>
 
-          <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-4 pb-5 h-auto transition-all duration-200">
-            <div class="flex items-center justify-between gap-3">
-              <div>
-                <h3 class="text-sm font-bold text-white">Режим «Отпуск / Заморозка»</h3>
-                <p class="text-[11px] text-[#8B949E]">Отключает пуши и ставит статус «На паузе» у тренера</p>
-              </div>
-              <button onclick="toggleStudentFreezeStatus()" class="w-12 h-7 rounded-full p-1 transition shrink-0 ${fr.is_frozen ? 'bg-[#00E676]' : 'bg-[#090C10] border border-[#30363D]'} flex items-center">
-                <div class="w-5 h-5 rounded-full transition transform ${fr.is_frozen ? 'translate-x-5 bg-[#090C10]' : 'translate-x-0 bg-[#8B949E]'}"></div>
-              </button>
+          <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-4 space-y-3">
+            <div class="flex items-center justify-between">
+              <h3 class="text-sm font-bold text-white flex items-center gap-1.5">
+                <i data-lucide="bell-ring" class="w-4 h-4 text-[#00E676]"></i>
+                <span>Уведомления в чат Telegram</span>
+              </h3>
+              <span class="text-[10px] text-[#8B949E]">Бот</span>
             </div>
-            <div class="grid grid-cols-2 gap-3 mt-3 w-full" style="${fr.is_frozen ? '' : 'display: none;'}">
-              <div class="flex flex-col gap-1 min-w-0">
-                <label class="text-[11px] font-medium text-[#8B949E]">С даты</label>
-                <input id="freeze-from" type="date" value="${fr.from}" onchange="updateFreezeDates()" class="w-full min-w-0 h-auto py-2.5 bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 text-xs font-semibold text-white outline-none" />
+
+            <div class="space-y-2.5">
+              <div class="p-3 rounded-xl bg-[#0D1117] border border-[#30363D] flex items-center justify-between gap-3">
+                <div>
+                  <div class="text-xs font-bold text-white">Запись, перенос и отмена тренировок</div>
+                  <div class="text-[11px] text-[#8B949E]">Подтверждения сразу в чат бота</div>
+                </div>
+                <button type="button" onclick="updateStudentNotificationSetting('booking_notify', ${!notif.booking_notify})" class="w-12 h-7 rounded-full p-1 transition shrink-0 ${notif.booking_notify ? 'bg-[#00E676]' : 'bg-[#090C10] border border-[#30363D]'} flex items-center">
+                  <div class="w-5 h-5 rounded-full transition transform ${notif.booking_notify ? 'translate-x-5 bg-[#090C10]' : 'translate-x-0 bg-[#8B949E]'}"></div>
+                </button>
               </div>
-              <div class="flex flex-col gap-1 min-w-0">
-                <label class="text-[11px] font-medium text-[#8B949E]">По дату</label>
-                <input id="freeze-to" type="date" value="${fr.to}" onchange="updateFreezeDates()" class="w-full min-w-0 h-auto py-2.5 bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 text-xs font-semibold text-white outline-none" />
+
+              <div class="p-3 rounded-xl bg-[#0D1117] border border-[#30363D] flex items-center justify-between gap-3">
+                <div>
+                  <div class="text-xs font-bold text-white">Воскресный чек-ап</div>
+                  <div class="text-[11px] text-[#8B949E]">Еженедельное напоминание в воскресенье</div>
+                </div>
+                <button type="button" onclick="updateStudentNotificationSetting('sunday_checkup', ${!notif.sunday_checkup})" class="w-12 h-7 rounded-full p-1 transition shrink-0 ${notif.sunday_checkup ? 'bg-[#00E676]' : 'bg-[#090C10] border border-[#30363D]'} flex items-center">
+                  <div class="w-5 h-5 rounded-full transition transform ${notif.sunday_checkup ? 'translate-x-5 bg-[#090C10]' : 'translate-x-0 bg-[#8B949E]'}"></div>
+                </button>
+              </div>
+
+              <div class="p-3 rounded-xl bg-[#0D1117] border border-[#30363D] flex items-center justify-between gap-3">
+                <div>
+                  <div class="text-xs font-bold text-white">InBody и фотоотчёт</div>
+                  <div class="text-[11px] text-[#8B949E]">Напоминание за 1 день до конца месяца</div>
+                </div>
+                <button type="button" onclick="updateStudentNotificationSetting('monthly_inbody_photos', ${!notif.monthly_inbody_photos})" class="w-12 h-7 rounded-full p-1 transition shrink-0 ${notif.monthly_inbody_photos ? 'bg-[#00E676]' : 'bg-[#090C10] border border-[#30363D]'} flex items-center">
+                  <div class="w-5 h-5 rounded-full transition transform ${notif.monthly_inbody_photos ? 'translate-x-5 bg-[#090C10]' : 'translate-x-0 bg-[#8B949E]'}"></div>
+                </button>
               </div>
             </div>
           </div>
@@ -5064,15 +5176,17 @@ function renderOnboardingScreen() {
     }
 
     let draftGeneratorSlots = [];
-    let draftGeneratorStartH = 9;
-    let draftGeneratorEndH = 21;
+    let draftGeneratorStartH = 6;
+    let draftGeneratorEndH = 24;
 
     function openTrainerSlotGeneratorModal() {
       triggerHaptic('light');
       const iso = uiState.selectedTrainerScheduleDate;
       const existing = appData.schedule_slots[iso] || [];
-      draftGeneratorStartH = existing.length > 0 ? (parseInt(existing[0].time.split(':')[0], 10) || 9) : 9;
-      draftGeneratorEndH = existing.length > 0 ? ((parseInt(existing[existing.length - 1].time.split(':')[0], 10) || 20) + 1) : 21;
+      const parsedFirst = existing.length > 0 ? parseInt(existing[0].time.split(':')[0], 10) : NaN;
+      const parsedLast = existing.length > 0 ? parseInt(existing[existing.length - 1].time.split(':')[0], 10) : NaN;
+      draftGeneratorStartH = !isNaN(parsedFirst) ? Math.max(6, Math.min(23, parsedFirst)) : 6;
+      draftGeneratorEndH = !isNaN(parsedLast) ? Math.max(draftGeneratorStartH + 1, Math.min(24, parsedLast + 1)) : 24;
       draftGeneratorSlots = [];
 
       for (let h = draftGeneratorStartH; h < draftGeneratorEndH; h++) {
@@ -5093,8 +5207,10 @@ function renderOnboardingScreen() {
     function rebuildDraftGeneratorRange() {
       const sEl = document.getElementById('gen-start-hour');
       const eEl = document.getElementById('gen-end-hour');
-      const startH = Math.max(6, Math.min(22, parseInt(sEl ? sEl.value : 9, 10) || 9));
-      const endH = Math.max(startH + 1, Math.min(23, parseInt(eEl ? eEl.value : 21, 10) || 21));
+      const rawStart = parseInt(sEl ? sEl.value : 6, 10);
+      const rawEnd = parseInt(eEl ? eEl.value : 24, 10);
+      const startH = Math.max(6, Math.min(23, isNaN(rawStart) ? 6 : rawStart));
+      const endH = Math.max(startH + 1, Math.min(24, isNaN(rawEnd) ? 24 : rawEnd));
       const iso = uiState.selectedTrainerScheduleDate;
       const existingDaySlots = appData.schedule_slots[iso] || [];
       const prevMap = new Map();
@@ -5130,6 +5246,43 @@ function renderOnboardingScreen() {
       s.is_open = !s.is_open;
       s.baseline_closed = !s.is_open;
       renderTrainerSlotGeneratorModalContent();
+    }
+
+    function toggleDraftGeneratorFullDay() {
+      triggerHaptic('light');
+      const freeSlots = draftGeneratorSlots.filter(s => !s.booked_by);
+      if (freeSlots.length === 0) {
+        showToast('Все слоты этого дня уже заняты записями учеников', 'error');
+        return;
+      }
+      const allFreeClosed = freeSlots.every(s => !s.is_open);
+      freeSlots.forEach(s => {
+        if (allFreeClosed) {
+          s.is_open = true;
+          s.baseline_closed = false;
+        } else {
+          s.is_open = false;
+          s.baseline_closed = true;
+        }
+      });
+      renderTrainerSlotGeneratorModalContent();
+    }
+
+    async function updateBookingHorizonDays(daysVal) {
+      const days = Math.max(1, Math.min(60, parseInt(daysVal, 10) || 10));
+      appData.booking_horizon_days = days;
+      const upcoming = getUpcomingDays(days);
+      if (!appData.schedule_slots) appData.schedule_slots = {};
+      upcoming.forEach(d => {
+        if (!appData.schedule_slots[d.iso]) {
+          appData.schedule_slots[d.iso] = buildDefaultHoursForDay(6, 24, [], {});
+        }
+      });
+      saveAppData();
+      renderApp();
+      triggerHaptic('success');
+      showToast(`Доступный период записи: ${days} дн.`);
+      await persistScheduleSlotsToSupabase();
     }
 
     async function applyTrainerGeneratedSchedule() {
@@ -5179,6 +5332,8 @@ function renderOnboardingScreen() {
     }
 
     function renderTrainerSlotGeneratorModalContent() {
+      const freeSlots = draftGeneratorSlots.filter(s => !s.booked_by);
+      const isFullDayHidden = freeSlots.length > 0 && freeSlots.every(s => !s.is_open);
       openModal(`
         <div class="space-y-4">
           <div class="flex items-center justify-between">
@@ -5189,14 +5344,24 @@ function renderOnboardingScreen() {
             <button onclick="closeModal()" class="text-[#8B949E] hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button>
           </div>
 
+          <div class="p-3 rounded-xl bg-[#0D1117] border border-[#30363D] flex items-center justify-between gap-3">
+            <div>
+              <div class="text-xs font-bold text-white">Скрыть весь день (Выходной)</div>
+              <div class="text-[11px] text-[#8B949E]">Закрывает все свободные слоты этого дня</div>
+            </div>
+            <button type="button" onclick="toggleDraftGeneratorFullDay()" class="w-12 h-7 rounded-full p-1 transition shrink-0 ${isFullDayHidden ? 'bg-amber-400' : 'bg-[#090C10] border border-[#30363D]'} flex items-center">
+              <div class="w-5 h-5 rounded-full transition transform ${isFullDayHidden ? 'translate-x-5 bg-[#090C10]' : 'translate-x-0 bg-[#8B949E]'}"></div>
+            </button>
+          </div>
+
           <div class="grid grid-cols-2 gap-2.5 bg-[#0D1117] p-3 rounded-xl border border-[#30363D]">
             <div>
-              <label class="block text-[10px] text-[#8B949E] mb-1">Начало дня (ч)</label>
-              <input id="gen-start-hour" type="number" min="6" max="20" value="${draftGeneratorStartH}" onchange="rebuildDraftGeneratorRange()" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2.5 py-1.5 text-xs font-bold text-white" />
+              <label class="block text-[10px] text-[#8B949E] mb-1">Начало дня (6–23)</label>
+              <input id="gen-start-hour" type="number" min="6" max="23" value="${draftGeneratorStartH}" onchange="rebuildDraftGeneratorRange()" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2.5 py-1.5 text-xs font-bold text-white" />
             </div>
             <div>
-              <label class="block text-[10px] text-[#8B949E] mb-1">Конец дня (ч)</label>
-              <input id="gen-end-hour" type="number" min="10" max="23" value="${draftGeneratorEndH}" onchange="rebuildDraftGeneratorRange()" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2.5 py-1.5 text-xs font-bold text-white" />
+              <label class="block text-[10px] text-[#8B949E] mb-1">Конец дня (7–24)</label>
+              <input id="gen-end-hour" type="number" min="7" max="24" value="${draftGeneratorEndH}" onchange="rebuildDraftGeneratorRange()" class="w-full bg-[#161B22] border border-[#30363D] rounded-lg px-2.5 py-1.5 text-xs font-bold text-white" />
             </div>
           </div>
 
@@ -5259,6 +5424,23 @@ function renderOnboardingScreen() {
       renderApp();
       triggerHaptic('warning');
       showToast(`Тренировка ${st ? st.full_name : ''} отменена. Занятие возвращено на баланс.`);
+      if (st) {
+        const trainerName = escapeTgHtml(appData?.trainer_profile?.full_name || 'Степан');
+        const studentName = escapeTgHtml(st.full_name || 'Ученик');
+        const balanceStr = st.subscription ? `${st.subscription.remaining} из ${st.subscription.total}` : 'обновлён';
+        sendTelegramClientNotification(
+          st,
+          buildTelegramEventCard({
+            title: `⚠️ <b>Тренер отменил тренировку</b>`,
+            dateTimeLine: `${formatHumanDate(isoDate)}${startTime ? `, ${startTime}` : ''}`,
+            quoteLines: [
+              `👥 Участники: ${trainerName} и ${studentName}`,
+              `♻️ Занятие возвращено на баланс: ${balanceStr}`
+            ]
+          }),
+          'booking_notify'
+        );
+      }
 
       // Фоновая синхронизация (DELETE из bookings + возврат +1 занятия в subscriptions)
       Promise.resolve().then(async () => {
@@ -5307,7 +5489,8 @@ function renderOnboardingScreen() {
     }
 
     function renderTrainerScheduleTab() {
-      const upcomingDays = getUpcomingDays(10);
+      const horizonDays = Number(appData.booking_horizon_days) || 10;
+      const upcomingDays = getUpcomingDays(horizonDays);
       if (!upcomingDays.some(d => d.iso === uiState.selectedTrainerScheduleDate)) {
         uiState.selectedTrainerScheduleDate = upcomingDays[0].iso;
       }
@@ -5367,6 +5550,22 @@ function renderOnboardingScreen() {
   <i data-lucide="sliders-horizontal" class="w-4 h-4 shrink-0"></i>
   <span>Настроить доступные часы</span>
 </button>
+
+          <div class="bg-[#161B22] border border-[#30363D] rounded-2xl px-3.5 py-2.5 flex items-center justify-between gap-2">
+            <span class="text-xs font-semibold text-[#8B949E] flex items-center gap-1.5">
+              <i data-lucide="calendar-days" class="w-4 h-4 text-[#00E676]"></i>
+              <span>Доступный период записи</span>
+            </span>
+            <select onchange="updateBookingHorizonDays(this.value)" class="bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-2.5 py-1.5 text-xs font-bold text-[#00E676] outline-none">
+              ${[
+                { v: 7, l: '7 дней' },
+                { v: 10, l: '10 дней' },
+                { v: 14, l: '14 дней' },
+                { v: 21, l: '21 день' },
+                { v: 30, l: '30 дней' }
+              ].map(opt => `<option value="${opt.v}" ${horizonDays === opt.v ? 'selected' : ''}>${opt.l}</option>`).join('')}
+            </select>
+          </div>
 
           <div class="space-y-2">
             <div class="flex items-center justify-between">
@@ -5527,7 +5726,20 @@ function renderOnboardingScreen() {
             </div>
           </div>
 
-          <!-- 4. Персональный код доступа -->
+          <!-- 4. Вкладка «Тренировки» -->
+          <label for="new-st-workouts-enabled" class="p-2.5 rounded-xl bg-[#0D1117] border border-[#30363D] flex items-center justify-between gap-3 cursor-pointer">
+            <div>
+              <div class="text-xs font-bold text-white">Вкладка «Тренировки»</div>
+              <div class="text-[10px] text-[#8B949E]">Дневник упражнений в меню ученика</div>
+            </div>
+            <div class="relative inline-flex items-center shrink-0">
+              <input id="new-st-workouts-enabled" type="checkbox" class="sr-only peer" />
+              <div class="w-11 h-6 bg-[#090C10] border border-[#30363D] rounded-full peer peer-checked:bg-[#00E676] peer-checked:border-[#00E676] transition-colors"></div>
+              <div class="absolute left-1 top-1 w-4 h-4 bg-[#8B949E] rounded-full peer-checked:translate-x-5 peer-checked:bg-[#090C10] transition-transform"></div>
+            </div>
+          </label>
+
+          <!-- 5. Персональный код доступа -->
           <div class="p-2.5 rounded-xl bg-[#0D1117] border border-[#10B981]/50 space-y-1">
             <label for="new-st-code" class="block text-[10px] text-[#8B949E] font-medium">Персональный код доступа</label>
             <input type="text" id="new-st-code" value="${generatedCode}" oninput="handleNewStudentCodeInput(this)" class="select-text w-full bg-[#090C10] border border-[#21262D] rounded-xl px-3 py-1.5 font-extrabold text-[#00E676] text-sm tracking-wider uppercase outline-none focus:border-[#00E676]" style="-webkit-user-select: text !important; user-select: text !important;" />
@@ -5546,7 +5758,7 @@ function renderOnboardingScreen() {
 function copyInviteCode(code, name = '') {
       const cleanCode = String(code || '').trim().toUpperCase();
       const studentName = String(name || '').trim();
-      const inviteText = `Привет${studentName ? ', ' + studentName : ''}! Твой персональный код доступа к Step Value: ${cleanCode}\nВведи его при входе в приложение.`;
+      const inviteText = `Привет${studentName ? ', ' + studentName : ''}! Твой персональный код доступа к WINNIEFIT (Тренер Степан): ${cleanCode}\nВведи его при входе в приложение.`;
 
       try {
         if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
@@ -5591,6 +5803,8 @@ function copyInviteCode(code, name = '') {
         const packEl = document.getElementById('new-st-pack');
         const durEl = document.getElementById('new-st-dur');
         const codeEl = document.getElementById('new-st-code');
+        const workoutsToggleEl = document.getElementById('new-st-workouts-enabled');
+        const workoutsEnabled = Boolean(workoutsToggleEl && workoutsToggleEl.checked);
 
         const customCode = (codeEl ? codeEl.value.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') : '');
         if (!customCode) {
@@ -5633,7 +5847,7 @@ function copyInviteCode(code, name = '') {
           full_name: fio,
           avatar: initials,
           status: 'active',
-          freeze_details: { is_frozen: false, from: '', to: '' },
+          workouts_enabled: workoutsEnabled,
           price: resolvedPrice,
           session_duration: dur,
           subscription: {
@@ -5652,7 +5866,7 @@ function copyInviteCode(code, name = '') {
           payment_history: [],
           medical_notes: '',
           trainer_private_notes: '',
-          notification_settings: { workout_reminder: '2h', sunday_checkup: true, monthly_inbody_photos: true },
+          notification_settings: { booking_notify: true, sunday_checkup: true, monthly_inbody_photos: true },
           workouts: [],
           anthropometry: [],
           checkups: [],
@@ -5728,6 +5942,21 @@ function copyInviteCode(code, name = '') {
         await persistStudentToSupabase(st);
         triggerHaptic('success');
         showToast('Комментарий к тренировке сохранён в облаке и виден подопечному!');
+        if (text) {
+          const trainerName = escapeTgHtml(appData?.trainer_profile?.full_name || 'Степан');
+          sendTelegramClientNotification(
+            st,
+            buildTelegramEventCard({
+              title: `💬 <b>Разбор тренировки от тренера (${trainerName})</b>`,
+              dateTimeLine: '',
+              quoteLines: [
+                `🏋️ Тренировка: ${escapeTgHtml(w.title || 'Тренировка')} (${escapeTgHtml(w.date || '')})`,
+                `📝 Комментарий: ${escapeTgHtml(text)}`
+              ]
+            }),
+            'booking_notify'
+          );
+        }
         renderApp();
       }
     }
@@ -5952,6 +6181,18 @@ function copyInviteCode(code, name = '') {
       await persistStudentToSupabase(st);
       renderApp();
       showToast(`Пакет обновлён в базе: ${currentRem} из ${newTotal} занятий`);
+    }
+
+    async function toggleStudentWorkoutsAccess(studentId) {
+      const st = getStudentById(studentId) || (appData.students || []).find(s => String(s.id) === String(studentId) || s.access_code === studentId);
+      if (!st) return;
+      syncTrainerManagementDraftFromDOM(st);
+      st.workouts_enabled = !Boolean(st.workouts_enabled);
+      saveAppData();
+      renderApp();
+      triggerHaptic('light');
+      showToast(st.workouts_enabled ? 'Вкладка «Тренировки» включена для подопечного' : 'Вкладка «Тренировки» скрыта для подопечного');
+      await persistStudentToSupabase(st);
     }
 
     async function setStudentSessionDuration(studentId, durationMins) {
@@ -6179,7 +6420,6 @@ function copyInviteCode(code, name = '') {
         return `<div class="p-6 text-center text-xs text-[#8B949E] bg-[#161B22] rounded-2xl border border-[#30363D]">Подопечные по запросу не найдены</div>`;
       }
       return sorted.map(st => {
-  const isFrozen = st.freeze_details && st.freeze_details.is_frozen;
   const workouts = Array.isArray(st.workouts) ? st.workouts : [];
   const hasUnreviewed = workouts.some(w => !(w.trainer_comment || w.trainer_feedback || w.status === 'reviewed'));
   const avatarBoxClass = 'relative w-11 h-11 rounded-xl bg-[#0D1117] border border-[#30363D] grid place-items-center shrink-0';
@@ -6200,8 +6440,8 @@ function copyInviteCode(code, name = '') {
                 </div>
                 <div class="flex items-center gap-2 mt-1">
                   <span class="text-xs text-[#8B949E]">Осталось: <strong class="text-white">${st.subscription.remaining} из ${st.subscription.total}</strong></span>
-                  <span class="text-[10px] font-bold px-2 py-0.5 rounded ${isFrozen ? 'bg-[#30363D] text-[#8B949E]' : 'bg-[#10B981]/20 text-[#00E676]'}">
-                    ${isFrozen ? `На паузе до ${formatDotDate(st.freeze_details.to).slice(0, 5)}` : 'Активен'}
+                  <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-[#10B981]/20 text-[#00E676]">
+                    Активен
                   </span>
                 </div>
               </div>
@@ -6251,7 +6491,6 @@ function copyInviteCode(code, name = '') {
         uiState.selectedTrainerStudentId = null;
         return renderTrainerStudentsTab();
       }
-      const isFrozen = st.freeze_details && st.freeze_details.is_frozen;
       const subScreen = uiState.trainerStudentSubscreen;
 
       const topStudentHeader = `
@@ -6266,7 +6505,7 @@ function copyInviteCode(code, name = '') {
             <div>
               <h2 class="text-base font-extrabold text-white">${st.full_name}</h2>
               <span class="text-xs text-[#00E676] font-semibold">
-                ${isFrozen ? `На паузе до ${formatDotDate(st.freeze_details.to)}` : 'Активен'} • Сессия ${formatDurationLabel(st.session_duration)}
+                Активен • Сессия ${formatDurationLabel(st.session_duration)}
               </span>
             </div>
             <div class="text-right">
@@ -6666,13 +6905,23 @@ function copyInviteCode(code, name = '') {
               </div>
             </div>
 
+            <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-4 flex items-center justify-between gap-3">
+              <div>
+                <h3 class="text-xs font-bold uppercase tracking-wider text-[#00E676]">Доступ к вкладке «Тренировки»</h3>
+                <p class="text-[11px] text-[#8B949E] mt-0.5">${st.workouts_enabled ? 'Вкладка открыта в нижнем меню ученика' : 'Вкладка скрыта для этого ученика'}</p>
+              </div>
+              <button type="button" onclick="toggleStudentWorkoutsAccess('${st.id}')" class="w-12 h-7 rounded-full p-1 transition shrink-0 ${st.workouts_enabled ? 'bg-[#00E676]' : 'bg-[#090C10] border border-[#30363D]'} flex items-center">
+                <div class="w-5 h-5 rounded-full transition transform ${st.workouts_enabled ? 'translate-x-5 bg-[#090C10]' : 'translate-x-0 bg-[#8B949E]'}"></div>
+              </button>
+            </div>
+
             <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-4 space-y-3">
               <div class="flex items-center justify-between">
                 <h3 class="text-xs font-bold uppercase tracking-wider text-[#00E676]">3. Контакт Telegram и оплата</h3>
                 <span class="text-[11px] text-[#8B949E]">День счёта: <strong id="tr-mgmt-payment-day-badge" class="text-white">${st.subscription.payment_day}-е число</strong></span>
               </div>
               <div>
-                <label class="block text-[11px] text-[#8B949E] mb-1">Индивидуальный день выставления счёта (только для тренера)</label>
+                <label class="block text-[11px] text-[#8B949E] mb-1">Индивидуальный день выставления счёта</label>
                 <select id="tr-mgmt-payment-day" onchange="updateStudentPaymentDay('${st.id}', this.value)" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs font-bold text-white outline-none">
                   ${Array.from({ length: 28 }, (_, idx) => idx + 1).map(d => `<option value="${d}" ${Number(st.subscription.payment_day) === d ? 'selected' : ''}>${d}-е число месяца</option>`).join('')}
                 </select>
@@ -6838,14 +7087,16 @@ function copyInviteCode(code, name = '') {
       nav.classList.remove('hidden');
 
       if (appData.current_role === 'student') {
+        const student = getCurrentStudent();
+        const workoutsAllowed = Boolean(student && student.workouts_enabled);
         const tabs = [
           { id: 'booking', label: 'Бронирование', icon: 'calendar-clock' },
-          { id: 'workouts', label: 'Тренировки', icon: 'dumbbell' },
+          ...(workoutsAllowed ? [{ id: 'workouts', label: 'Тренировки', icon: 'dumbbell' }] : []),
           { id: 'reports', label: 'Отчёты', icon: 'line-chart' },
           { id: 'profile', label: 'Профиль', icon: 'user' }
         ];
         nav.innerHTML = `
-          <div class="grid grid-cols-4 gap-1 px-2 py-2">
+          <div class="grid ${workoutsAllowed ? 'grid-cols-4' : 'grid-cols-3'} gap-1 px-2 py-2">
             ${tabs.map(t => {
               const active = uiState.studentTab === t.id;
               return `
@@ -6928,6 +7179,11 @@ function copyInviteCode(code, name = '') {
       if (!appData.current_role) {
         main.innerHTML = renderOnboardingScreen();
       } else if (appData.current_role === 'student') {
+        const activeStudentForRoute = getCurrentStudent();
+        if (uiState.studentTab === 'workouts' && !Boolean(activeStudentForRoute && activeStudentForRoute.workouts_enabled)) {
+          uiState.studentTab = 'booking';
+          uiState.workoutEditorOpen = false;
+        }
         if (uiState.studentTab === 'booking') main.innerHTML = renderStudentBookingTab();
         else if (uiState.studentTab === 'workouts') main.innerHTML = renderStudentWorkoutsTab();
         else if (uiState.studentTab === 'reports') main.innerHTML = renderStudentReportsTab();
@@ -6973,6 +7229,10 @@ function copyInviteCode(code, name = '') {
       // 2. Запрашиваем актуальные данные строго из Supabase для тренера и ученика
       try {
         await syncAllStudentsFromSupabase();
+        if (!appData.current_role) {
+          const restoredAfterSync = await restoreSessionFromTelegram();
+          if (restoredAfterSync) renderApp();
+        }
       } catch (err) {
         console.warn('Ошибка загрузки из Supabase при старте:', err);
       }
