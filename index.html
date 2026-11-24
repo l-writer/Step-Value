@@ -2688,7 +2688,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
                   const { data: coaches } = await supabaseClient
                     .from('users')
                     .select('id')
-                    .in('role', ['coach', 'trainer'])
+                    .eq('role', 'coach')
                     .limit(1);
                   if (Array.isArray(coaches) && coaches.length > 0) {
                     appData.trainer_profile.supabase_id = coaches[0].id;
