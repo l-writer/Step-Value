@@ -6444,7 +6444,7 @@ function copyInviteCode(code, name = '') {
       return sorted.map(st => {
   const workouts = Array.isArray(st.workouts) ? st.workouts : [];
   const hasUnreviewed = workouts.some(w => !(w.trainer_comment || w.trainer_feedback || w.status === 'reviewed'));
-  const avatarBoxClass = 'relative w-11 h-11 rounded-xl bg-[#10B981]/15 border border-[#00E676]/50 shadow-neon grid place-items-center shrink-0';
+  const avatarBoxClass = 'relative w-11 h-11 rounded-xl bg-[#0D1117] border border-[#30363D] grid place-items-center shrink-0';
 
   const avatarIconMarkup = hasUnreviewed
     ? '<i data-lucide="user" class="w-5 h-5 text-[#00E676]"></i><span class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-amber-400 ring-2 ring-[#0D1117] shadow-[0_0_8px_rgba(251,191,36,0.6)]"></span>'
