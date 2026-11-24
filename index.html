@@ -741,13 +741,17 @@
               }
               Object.keys(parsedSchedule).forEach(dateKey => {
                 if (Array.isArray(parsedSchedule[dateKey])) {
-                  appData.schedule_slots[dateKey] = parsedSchedule[dateKey].map(s => ({
-                    time: s.time,
-                    duration: Number(s.duration) || 60,
-                    is_open: Boolean(s.is_open),
-                    baseline_closed: s.baseline_closed !== undefined ? Boolean(s.baseline_closed) : !Boolean(s.is_open),
-                    booked_by: null
-                  }));
+                  const arr = parsedSchedule[dateKey];
+                  const isLegacyDefault = arr.length === 12 && arr[0]?.time === '09:00' && arr[arr.length - 1]?.time === '20:00' && arr.every(x => x.is_open && !x.booked_by);
+                  appData.schedule_slots[dateKey] = isLegacyDefault
+                    ? buildDefaultHoursForDay(6, 24, [], {})
+                    : arr.map(s => ({
+                        time: s.time,
+                        duration: Number(s.duration) || 60,
+                        is_open: Boolean(s.is_open),
+                        baseline_closed: s.baseline_closed !== undefined ? Boolean(s.baseline_closed) : !Boolean(s.is_open),
+                        booked_by: null
+                      }));
                 }
               });
             }
@@ -5574,7 +5578,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
               <i data-lucide="calendar-days" class="w-4 h-4 text-[#00E676]"></i>
               <span>Доступный период записи</span>
             </span>
-            <select onchange="updateBookingHorizonDays(this.value)" class="bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-2.5 py-1.5 text-xs font-bold text-[#00E676] outline-none">
+            <select onchange="updateBookingHorizonDays(this.value)" class="appearance-none bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-4 py-1.5 text-xs font-bold text-[#00E676] text-center cursor-pointer outline-none" style="text-align-last: center;">
               ${[
                 { v: 7, l: '7 дней' },
                 { v: 10, l: '10 дней' },
@@ -6440,11 +6444,11 @@ function copyInviteCode(code, name = '') {
       return sorted.map(st => {
   const workouts = Array.isArray(st.workouts) ? st.workouts : [];
   const hasUnreviewed = workouts.some(w => !(w.trainer_comment || w.trainer_feedback || w.status === 'reviewed'));
-  const avatarBoxClass = 'relative w-11 h-11 rounded-xl bg-[#0D1117] border border-[#30363D] grid place-items-center shrink-0';
+  const avatarBoxClass = 'relative w-11 h-11 rounded-xl bg-[#10B981]/15 border border-[#00E676]/50 shadow-neon grid place-items-center shrink-0';
 
   const avatarIconMarkup = hasUnreviewed
-    ? '<i data-lucide="user" class="w-5 h-5 text-[#8B949E]"></i><span class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-amber-400 ring-2 ring-[#0D1117] shadow-[0_0_8px_rgba(251,191,36,0.6)]"></span>'
-    : '<i data-lucide="user" class="w-5 h-5 text-[#8B949E]"></i>';
+    ? '<i data-lucide="user" class="w-5 h-5 text-[#00E676]"></i><span class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-amber-400 ring-2 ring-[#0D1117] shadow-[0_0_8px_rgba(251,191,36,0.6)]"></span>'
+    : '<i data-lucide="user" class="w-5 h-5 text-[#00E676]"></i>';
   return `
     <div onclick="openTrainerStudentPage('${st.id}')" class="bg-[#161B22] hover:bg-[#1C2128] transition p-3.5 rounded-2xl border border-[#30363D] flex items-center justify-between cursor-pointer group">
       <div class="flex items-center gap-3 min-w-0">
