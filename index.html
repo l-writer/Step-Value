@@ -2672,7 +2672,8 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
         uiState.onboardingMode = null;
         saveSessionToTelegramCloud('trainer', '', val);
 
-        if (tgUser && tgUser.id) {
+        const isRealCoachTg = String(tgUser?.username || '').trim().replace(/^@/, '').toLowerCase() === String(appData?.trainer_profile?.telegram_username || '').trim().replace(/^@/, '').toLowerCase();
+        if (tgUser && tgUser.id && isRealCoachTg) {
           appData.trainer_profile.telegram_id = Number(tgUser.id);
           Promise.resolve().then(async () => {
             try {
