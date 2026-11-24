@@ -1073,12 +1073,14 @@
           if (matchedStudent) {
             appData.current_student_id = matchedStudent.id;
             saveSessionToTelegramCloud('student', matchedStudent.id, matchedStudent.access_code);
-          } else if (appData.students[0]) {
-            appData.current_student_id = appData.students[0].id;
+          } else {
+            clearSessionInTelegramCloud();
+            appData.current_role = null;
+            appData.current_student_id = null;
           }
         } else if (appData.current_student_id && !appData.students.some(s => String(s.id) === String(appData.current_student_id))) {
           const bySavedCode = savedCode ? appData.students.find(s => String(s.access_code || '').toUpperCase() === savedCode) : null;
-          appData.current_student_id = bySavedCode ? bySavedCode.id : (appData.students[0] ? appData.students[0].id : null);
+          appData.current_student_id = bySavedCode ? bySavedCode.id : null;
         }
         renderApp();
       } catch (err) {
@@ -1757,7 +1759,7 @@ const TELEGRAM_STORAGE_CONFIG = {
       const quoteBlock = quoteLines.length > 0
         ? `\n\n<blockquote expandable>${quoteLines.join('\n')}</blockquote>`
         : '';
-      return `${title}${dateTimeLine ? `\n\n🕒 ${dateTimeLine}\nПо вашей таймзоне: Europe/Moscow` : ''}${quoteBlock}`;
+      return `${title}${dateTimeLine ? `\n\n📅 ${dateTimeLine} (МСК)` : ''}${quoteBlock}`;
     }
 
     async function sendTelegramTrainerNotification(messageText) {
@@ -2303,12 +2305,12 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
       if (!appData) return null;
       if (!Array.isArray(appData.students)) appData.students = [];
       let found = null;
-      if (appData.students.length > 0) {
+      if (appData.students.length > 0 && appData.current_student_id) {
         found = appData.students.find(s =>
           String(s.id) === String(appData.current_student_id) ||
           (s.supabase_id && String(s.supabase_id) === String(appData.current_student_id)) ||
           (s.access_code && String(s.access_code).toUpperCase() === String(appData.current_student_id).toUpperCase())
-        ) || appData.students[0];
+        ) || null;
       }
       if (!found && appData.current_role === 'student') {
         const savedCode = (typeof localStorage !== 'undefined' ? (localStorage.getItem('sv_access_code') || '') : '').trim().toUpperCase();
@@ -2424,11 +2426,13 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
     }
 
     function saveSessionToTelegramCloud(role, studentId = '', accessCode = '') {
+      const currentTgUid = String(window.Telegram?.WebApp?.initDataUnsafe?.user?.id || '');
       try {
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem('sv_role', String(role || ''));
           localStorage.setItem('sv_student_id', String(studentId || ''));
           localStorage.setItem('sv_access_code', String(accessCode || ''));
+          localStorage.setItem('sv_tg_uid', currentTgUid);
         }
       } catch (lsErr) {
         console.warn('localStorage setItem fallback:', lsErr);
@@ -2438,6 +2442,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
           sessionStorage.setItem('sv_role', String(role || ''));
           sessionStorage.setItem('sv_student_id', String(studentId || ''));
           sessionStorage.setItem('sv_access_code', String(accessCode || ''));
+          sessionStorage.setItem('sv_tg_uid', currentTgUid);
         }
       } catch (ssErr) {
         console.warn('sessionStorage setItem fallback:', ssErr);
@@ -2490,12 +2495,20 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
     async function restoreSessionFromTelegram() {
       try {
         let sessionCandidate = null;
+        const activeTgUid = String(window.Telegram?.WebApp?.initDataUnsafe?.user?.id || '');
         try {
           if (typeof localStorage !== 'undefined') {
             const lsRole = localStorage.getItem('sv_role');
             const lsStudentId = localStorage.getItem('sv_student_id');
             const lsAccessCode = localStorage.getItem('sv_access_code');
-            if (lsRole === 'trainer' || lsRole === 'student') {
+            const lsTgUid = localStorage.getItem('sv_tg_uid') || '';
+            const tgMatches = !activeTgUid || (lsTgUid && lsTgUid === activeTgUid);
+            if (!tgMatches) {
+              localStorage.removeItem('sv_role');
+              localStorage.removeItem('sv_student_id');
+              localStorage.removeItem('sv_access_code');
+              localStorage.removeItem('sv_tg_uid');
+            } else if (lsRole === 'trainer' || lsRole === 'student') {
               sessionCandidate = {
                 sv_role: lsRole,
                 sv_student_id: lsStudentId || '',
@@ -2517,7 +2530,14 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
               const ssRole = sessionStorage.getItem('sv_role');
               const ssStudentId = sessionStorage.getItem('sv_student_id');
               const ssAccessCode = sessionStorage.getItem('sv_access_code');
-              if (ssRole === 'trainer' || ssRole === 'student') {
+              const ssTgUid = sessionStorage.getItem('sv_tg_uid') || '';
+              const tgMatches = !activeTgUid || (ssTgUid && ssTgUid === activeTgUid);
+              if (!tgMatches) {
+                sessionStorage.removeItem('sv_role');
+                sessionStorage.removeItem('sv_student_id');
+                sessionStorage.removeItem('sv_access_code');
+                sessionStorage.removeItem('sv_tg_uid');
+              } else if (ssRole === 'trainer' || ssRole === 'student') {
                 sessionCandidate = {
                   sv_role: ssRole,
                   sv_student_id: ssStudentId || '',
@@ -2652,7 +2672,8 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
         uiState.onboardingMode = null;
         saveSessionToTelegramCloud('trainer', '', val);
 
-        if (tgUser && tgUser.id) {
+        const isRealCoachTg = String(tgUser?.username || '').trim().replace(/^@/, '').toLowerCase() === String(appData?.trainer_profile?.telegram_username || '').trim().replace(/^@/, '').toLowerCase();
+        if (tgUser && tgUser.id && isRealCoachTg) {
           appData.trainer_profile.telegram_id = Number(tgUser.id);
           Promise.resolve().then(async () => {
             try {
@@ -2668,7 +2689,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
                   const { data: coaches } = await supabaseClient
                     .from('users')
                     .select('id')
-                    .in('role', ['coach', 'trainer'])
+                    .eq('role', 'coach')
                     .limit(1);
                   if (Array.isArray(coaches) && coaches.length > 0) {
                     appData.trainer_profile.supabase_id = coaches[0].id;
@@ -2994,12 +3015,12 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
           const studentName = escapeTgHtml(student.full_name || 'Ученик');
           const balanceStr = `${student.subscription.remaining} из ${student.subscription.total}`;
           const rescheduleHtml = buildTelegramEventCard({
-            title: `🔄 <b>Тренировка перенесена (${studentName})</b>`,
-            dateTimeLine: `${formatHumanDate(isoDate)}, ${startTime}`,
+            title: `🔄 <b>Тренировка перенесена</b>`,
+            dateTimeLine: `${formatHumanDate(isoDate)} • ${startTime}`,
             quoteLines: [
-              `👥 Участники: ${trainerName} и ${studentName}`,
-              `↩️ Было: ${formatHumanDate(oldReschedDate)}, ${oldReschedTime}`,
-              `🎟 Остаток по абонементу: ${balanceStr}`
+              `👤 ${studentName} • Тренер: ${trainerName}`,
+              `↩️ Было: ${formatHumanDate(oldReschedDate)} • ${oldReschedTime}`,
+              `🎟 Остаток: ${balanceStr}`
             ]
           });
           sendTelegramClientNotification(student, rescheduleHtml, 'booking_notify');
@@ -3074,11 +3095,11 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
             const studentName = escapeTgHtml(activeStudent.full_name || 'Ученик');
             const balanceStr = `${activeStudent.subscription.remaining} из ${activeStudent.subscription.total}`;
             const bookedHtml = buildTelegramEventCard({
-              title: `✨ <b>Запланирована тренировка (${studentName})</b>`,
-              dateTimeLine: `${formatHumanDate(isoDate)}, ${startTime}`,
+              title: `✅ <b>Запись на тренировку</b>`,
+              dateTimeLine: `${formatHumanDate(isoDate)} • ${startTime}`,
               quoteLines: [
-                `👥 Участники: ${trainerName} и ${studentName}`,
-                `🎟 Остаток по абонементу: ${balanceStr}`
+                `👤 ${studentName} • Тренер: ${trainerName}`,
+                `🎟 Остаток: ${balanceStr}`
               ]
             });
             sendTelegramClientNotification(activeStudent, bookedHtml, 'booking_notify');
@@ -3130,11 +3151,11 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
   const studentName = escapeTgHtml(student.full_name || 'Ученик');
   const balanceStr = student.subscription ? `${student.subscription.remaining} из ${student.subscription.total}` : 'обновлён';
   const cancelHtml = buildTelegramEventCard({
-    title: `❌ <b>Тренировка отменена (${studentName})</b>`,
-    dateTimeLine: `${formatHumanDate(target.date)}, ${target.time}`,
+    title: `❌ <b>Тренировка отменена</b>`,
+    dateTimeLine: `${formatHumanDate(target.date)} • ${target.time}`,
     quoteLines: [
-      `👥 Участники: ${trainerName} и ${studentName}`,
-      `♻️ Занятие возвращено на баланс: ${balanceStr}`
+      `👤 ${studentName} • Тренер: ${trainerName}`,
+      `♻️ Занятие возвращено: ${balanceStr}`
     ]
   });
   sendTelegramClientNotification(student, cancelHtml, 'booking_notify');
@@ -5429,10 +5450,10 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
           st,
           buildTelegramEventCard({
             title: `⚠️ <b>Тренер отменил тренировку</b>`,
-            dateTimeLine: `${formatHumanDate(isoDate)}${startTime ? `, ${startTime}` : ''}`,
+            dateTimeLine: `${formatHumanDate(isoDate)}${startTime ? ` • ${startTime}` : ''}`,
             quoteLines: [
-              `👥 Участники: ${trainerName} и ${studentName}`,
-              `♻️ Занятие возвращено на баланс: ${balanceStr}`
+              `👤 ${studentName} • Тренер: ${trainerName}`,
+              `♻️ Занятие возвращено: ${balanceStr}`
             ]
           }),
           'booking_notify'
@@ -5755,7 +5776,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
 function copyInviteCode(code, name = '') {
       const cleanCode = String(code || '').trim().toUpperCase();
       const studentName = String(name || '').trim();
-      const inviteText = `Привет${studentName ? ', ' + studentName : ''}! Твой персональный код доступа к WINNIEFIT (Тренер Степан): ${cleanCode}\nВведи его при входе в приложение.`;
+      const inviteText = `Привет${studentName ? ', ' + studentName : ''}! Твой персональный код доступа к WINNIEFIT (Тренер Степан): ${cleanCode}\n\nОткрой бота: https://t.me/step_vault_app_bot\nНажми «Старт», запусти приложение и введи этот код при входе.`;
 
       try {
         if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
@@ -5944,11 +5965,11 @@ function copyInviteCode(code, name = '') {
           sendTelegramClientNotification(
             st,
             buildTelegramEventCard({
-              title: `💬 <b>Разбор тренировки от тренера (${trainerName})</b>`,
+              title: `💬 <b>Разбор тренировки</b>`,
               dateTimeLine: '',
               quoteLines: [
-                `🏋️ Тренировка: ${escapeTgHtml(w.title || 'Тренировка')} (${escapeTgHtml(w.date || '')})`,
-                `📝 Комментарий: ${escapeTgHtml(text)}`
+                `🏋️ ${escapeTgHtml(w.title || 'Тренировка')} (${escapeTgHtml(w.date || '')})`,
+                `📝 ${escapeTgHtml(text)}`
               ]
             }),
             'booking_notify'
