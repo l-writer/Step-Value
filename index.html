@@ -700,17 +700,18 @@
         return;
       }
       try {
-        const [usersRes, subsRes, bksRes, reportsRes, anthroRes, checkupsRes, slotsRes] = await Promise.allSettled([
-          supabaseClient.from('users').select('*'),
-          supabaseClient.from('subscriptions').select('*'),
-          supabaseClient.from('bookings').select('*').eq('status', 'confirmed'),
-          supabaseClient.from('student_reports').select('*').in('type', ['profile_meta', 'schedule_meta', 'weekly_photo', 'inbody_scan']),
-          supabaseClient.from('anthropometry_records').select('*').order('recorded_at', { ascending: true }),
-          supabaseClient.from('weekly_checkups').select('*').order('submitted_at', { ascending: true }),
-          supabaseClient.from('schedule_slots').select('*')
-        ]);
+        const inputEl = document.getElementById('input-access-code');
+        const typedCode = inputEl ? inputEl.value.trim().toUpperCase() : '';
+        const savedCode = (typeof localStorage !== 'undefined' ? (localStorage.getItem('sv_access_code') || '') : '').trim().toUpperCase();
+        const codeForRpc = typedCode || (appData.current_role === 'trainer' ? (appData?.trainer_profile?.master_pin || 'STEP878') : savedCode);
 
-        const allUsers = (usersRes.status === 'fulfilled' && usersRes.value && Array.isArray(usersRes.value.data)) ? usersRes.value.data : [];
+        if (!codeForRpc) return;
+
+        const { data: rpcData, error: rpcErr } = await supabaseClient.rpc('login_by_code', { p_code: codeForRpc });
+        if (rpcErr || !rpcData || !rpcData.ok) return;
+
+        const isTrainerRpc = rpcData.role === 'trainer';
+        const allUsers = isTrainerRpc ? (rpcData.users || []) : (rpcData.user ? [rpcData.user] : []);
         const coachUser = allUsers.find(u => u.role === 'coach' || u.role === 'trainer');
         if (coachUser && coachUser.id) {
           currentCoachId = coachUser.id;
@@ -720,12 +721,17 @@
           }
         }
         const users = allUsers.filter(u => !u.role || u.role === 'student');
-        const subs = (subsRes.status === 'fulfilled' && subsRes.value && Array.isArray(subsRes.value.data)) ? subsRes.value.data : [];
-        const bks = (bksRes.status === 'fulfilled' && bksRes.value && Array.isArray(bksRes.value.data)) ? bksRes.value.data : [];
-        const reports = (reportsRes.status === 'fulfilled' && reportsRes.value && Array.isArray(reportsRes.value.data)) ? reportsRes.value.data : [];
-        const anthroRows = (anthroRes.status === 'fulfilled' && anthroRes.value && Array.isArray(anthroRes.value.data)) ? anthroRes.value.data : [];
-        const checkupRows = (checkupsRes.status === 'fulfilled' && checkupsRes.value && Array.isArray(checkupsRes.value.data)) ? checkupsRes.value.data : [];
-        const rawScheduleSlots = (slotsRes.status === 'fulfilled' && slotsRes.value && Array.isArray(slotsRes.value.data)) ? slotsRes.value.data : [];
+        const subs = isTrainerRpc ? (rpcData.subscriptions || []) : (rpcData.subscription && rpcData.subscription !== 'null' ? [rpcData.subscription] : []);
+        const bks = rpcData.bookings || [];
+        const reports = isTrainerRpc
+          ? (rpcData.reports || [])
+          : [
+              ...(rpcData.schedule ? [{ type: 'schedule_meta', student_code: 'TRAINER_SCHEDULE', photo_file_id: JSON.stringify(rpcData.schedule), id: 1 }] : []),
+              ...(rpcData.user && rpcData.profile_meta ? [{ type: 'profile_meta', student_id: rpcData.user.id, student_code: codeForRpc, photo_file_id: JSON.stringify(rpcData.profile_meta), id: 2 }] : [])
+            ];
+        const anthroRows = rpcData.anthropometry || [];
+        const checkupRows = rpcData.checkups || [];
+        const rawScheduleSlots = [];
 
         const scheduleReports = reports
           .filter(r => r.type === 'schedule_meta' && r.student_code === 'TRAINER_SCHEDULE')
@@ -1066,7 +1072,7 @@
         migrateLoadedData();
         saveAppData();
         await autoProcessCompletedBookings();
-        const savedCode = (typeof localStorage !== 'undefined' ? (localStorage.getItem('sv_access_code') || '') : '').trim().toUpperCase();
+        savedCode = (typeof localStorage !== 'undefined' ? (localStorage.getItem('sv_access_code') || '') : '').trim().toUpperCase();
         const savedId = (typeof localStorage !== 'undefined' ? (localStorage.getItem('sv_student_id') || '') : '').trim();
         if (appData.current_role === 'student') {
           const matchedStudent = appData.students.find(s =>
@@ -2317,7 +2323,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
         ) || null;
       }
       if (!found && appData.current_role === 'student') {
-        const savedCode = (typeof localStorage !== 'undefined' ? (localStorage.getItem('sv_access_code') || '') : '').trim().toUpperCase();
+        savedCode = (typeof localStorage !== 'undefined' ? (localStorage.getItem('sv_access_code') || '') : '').trim().toUpperCase();
         const savedId = (typeof localStorage !== 'undefined' ? (localStorage.getItem('sv_student_id') || '') : '').trim();
         found = getFallbackStudent(savedId || 'step-default', savedCode || 'STEP-104');
       }
@@ -2762,7 +2768,9 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
 
     function renderOnboardingScreen() {
       return `
-        <div class="min-h-[78vh] flex flex-col justify-center py-6 animate-fade">
+        <div class="min-h-[82vh] flex flex-col justify-between py-6 animate-fade">
+          <div></div>
+          <div>
           <div class="text-center mb-7">
             <div class="mx-auto mb-5 flex items-center justify-center">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 86" class="w-full max-w-[220px] h-auto" aria-label="WINNIEFIT">
@@ -2798,6 +2806,11 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
               </button>
             </div>
           ` : ''}
+          </div>
+
+          <p class="text-[10px] text-[#484F58] text-center leading-snug px-4 pt-8">
+            Информационный спортивный дневник. Сервис не является медицинской организацией и не запрашивает персональные данные — вход выполняется по анонимному коду доступа.
+          </p>
         </div>
       `;
     }
@@ -5017,7 +5030,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
         student.medical_notes = el.value.trim();
         await persistStudentToSupabase(student);
         triggerHaptic('success');
-        showToast('Медкарта и ограничения сохранены в базе и видны тренеру');
+        showToast('Пожелания к тренировкам сохранены');
         renderApp();
       }
     }
@@ -5164,14 +5177,14 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
           <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-4 space-y-2.5">
             <div class="flex items-center justify-between">
               <h3 class="text-sm font-bold text-white flex items-center gap-1.5">
-                <i data-lucide="heart-pulse" class="w-4 h-4 text-[#00E676]"></i>
-                <span>Медкарта и ограничения</span>
+                <i data-lucide="message-square-plus" class="w-4 h-4 text-[#00E676]"></i>
+                <span>Пожелания к тренировкам</span>
               </h3>
               <span class="text-[10px] text-[#8B949E]">Видно тренеру</span>
             </div>
-            <textarea id="student-medical-notes" rows="3" placeholder="Травмы, ограничения по упражнениям (например: ноет плечо, не делать присед со свободным весом)" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl p-3 text-xs text-white outline-none resize-none">${student.medical_notes || ''}</textarea>
+            <textarea id="student-medical-notes" rows="3" placeholder="Например: хочется больше акцента на спину, не делать присед со свободным весом" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl p-3 text-xs text-white outline-none resize-none">${student.medical_notes || ''}</textarea>
             <button onclick="saveStudentMedicalNotes()" class="w-full py-2.5 rounded-xl bg-[#1F242C] hover:bg-[#10B981] hover:text-[#090C10] border border-[#30363D] text-xs font-bold text-white transition">
-              Сохранить медкарту
+              Сохранить пожелания
             </button>
           </div>
 
@@ -6968,11 +6981,11 @@ function copyInviteCode(code, name = '') {
 
             <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-4 space-y-2">
               <h3 class="text-xs font-bold uppercase tracking-wider text-[#00E676] flex items-center gap-1.5">
-                <i data-lucide="heart-pulse" class="w-4 h-4 text-[#00E676]"></i>
-                <span>4. ОГРАНИЧЕНИЯ ПО ЗДОРОВЬЮ</span>
+                <i data-lucide="message-square-plus" class="w-4 h-4 text-[#00E676]"></i>
+                <span>4. ПОЖЕЛАНИЯ К ТРЕНИРОВКАМ</span>
               </h3>
               <p class="text-xs text-white bg-[#0D1117] p-3 rounded-xl border border-[#30363D]">
-                ${st.medical_notes || 'Ограничений не указано'}
+                ${st.medical_notes || 'Пожеланий не указано'}
               </p>
             </div>
 
