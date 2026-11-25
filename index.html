@@ -3469,7 +3469,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
       for (let i = 0; i < 4; i++) {
         defaultRows.push({
           name: '',
-          sets: 4,
+          sets: 3,
           reps: '',
           weight: '',
           video_url: '',
@@ -3511,7 +3511,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
         const wEl = document.getElementById(`ex-weight-${idx}`);
         const vEl = document.getElementById(`ex-video-${idx}`);
         if (nEl) ex.name = nEl.value;
-        if (sEl) ex.sets = Number(sEl.value) || 4;
+        if (sEl) ex.sets = Number(sEl.value) || 3;
         if (rEl) {
           const rawR = String(rEl.value || '').replace(',', '.').trim();
           ex.reps = rawR === '' ? '' : (Number(rawR) || 0);
@@ -3551,7 +3551,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
       if (!uiState.draftWorkout) return;
       uiState.draftWorkout.exercises.push({
         name: '',
-        sets: 4,
+        sets: 3,
         reps: '',
         weight: '',
         video_url: '',
@@ -3679,7 +3679,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
           const cleanReps = parseInt(String(e.reps ?? '0').replace(',', '.'), 10) || 0;
           return {
             name: e.name.trim(),
-            sets: Math.min(8, Math.max(1, Number(e.sets) || 4)),
+            sets: Math.min(8, Math.max(1, Number(e.sets) || 3)),
             reps: cleanReps,
             weight: cleanWeight,
             video_url: (e.video_url || '').trim(),
@@ -3786,7 +3786,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
             </div>
 
             ${d.exercises.map((ex, idx) => {
-              const setsVal = Math.min(8, Math.max(1, Number(ex.sets) || 4));
+              const setsVal = Math.min(8, Math.max(1, Number(ex.sets) || 3));
               const repsVal = (ex.reps === undefined || ex.reps === null || ex.reps === 0 || ex.reps === '0') ? '' : ex.reps;
               return `
                 <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-3.5 space-y-3">
@@ -4611,16 +4611,9 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
               <button onclick="openStudentReportSubscreen(null)" class="text-xs font-semibold text-[#8B949E] hover:text-white flex items-center gap-1.5 py-1.5 px-3 rounded-xl bg-[#161B22] border border-[#30363D]">
                 <span>← Назад к отчётам</span>
               </button>
-              <div class="flex items-center gap-2">
-                <label class="cursor-pointer py-1.5 px-3 rounded-xl bg-[#161B22] border border-[#30363D] hover:border-[#00E676] text-xs font-semibold text-white transition flex items-center gap-1.5">
-                  <i data-lucide="camera" class="w-3.5 h-3.5 text-[#00E676]"></i>
-                  <span>Скан в ТГ</span>
-                  <input type="file" accept="image/*" class="hidden" onchange="handleReportPhotoUpload(event, 'inbody_scan')" />
-                </label>
-                <button onclick="submitInBodyScanModal()" class="py-1.5 px-3 rounded-xl bg-[#00E676] text-black font-semibold text-xs hover:bg-[#00c864] transition">
-                  <span>+ Внести замеры</span>
-                </button>
-              </div>
+              <button onclick="submitInBodyScanModal()" class="py-2 px-3.5 rounded-xl bg-[#00E676] text-[#090C10] font-extrabold text-xs hover:bg-[#00c864] shadow-neon transition">
+                <span>+ Внести замеры</span>
+              </button>
             </div>
 
             ${renderInBodyDetailedGrid(latest)}
