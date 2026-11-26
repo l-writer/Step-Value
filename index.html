@@ -328,7 +328,7 @@
         usedSessions = Math.max(0, totalSessions - remainingSessions);
 
         const durationMins = Number(st.session_duration) || 60;
-        const billingDay = Math.min(28, Math.max(1, Number(st.subscription?.payment_day ?? st.subscription?.billing_day) || 1));
+        const billingDay = Math.min(28, Math.max(0, Number(st.subscription?.payment_day ?? st.subscription?.billing_day ?? 1) || 0));
         const subscriptionPrice = Number(st.price ?? st.subscription?.price ?? parseNumericRubles(st.subscription?.robokassa_sum)) || 15000;
         const robokassaSum = (st.subscription?.robokassa_sum && st.subscription?.robokassa_sum !== '0 ₽')
           ? st.subscription.robokassa_sum
@@ -361,7 +361,7 @@
             total_sessions: Number(totalSessions) || 0,
             used_sessions: Number(usedSessions) || 0,
             session_duration_minutes: Number(durationMins) || 60,
-            billing_day: Number(billingDay) || 1,
+            billing_day: Number(billingDay) || 0,
             status: subStatus
           };
 
@@ -612,7 +612,7 @@
 
         const remaining = Math.max(0, total - used);
         const dur = Number(sub?.session_duration_minutes ?? profileMeta?.session_duration ?? student.session_duration) || 60;
-        const billDay = Math.min(28, Math.max(1, Number(sub?.billing_day ?? metaSub?.payment_day ?? metaSub?.billing_day ?? student.subscription?.payment_day) || 1));
+        const billDay = Math.min(28, Math.max(0, Number(sub?.billing_day ?? metaSub?.payment_day ?? metaSub?.billing_day ?? student.subscription?.payment_day ?? 1) || 0));
 
         student.session_duration = dur;
         if (!student.subscription) student.subscription = {};
@@ -946,7 +946,7 @@
           if (remaining > total) remaining = total;
 
           const dur = Number(userSub?.session_duration_minutes ?? meta?.session_duration ?? prevSt?.session_duration) || 60;
-          const billDay = Math.min(28, Math.max(1, Number(userSub?.billing_day ?? metaSub?.payment_day ?? metaSub?.billing_day ?? prevSt?.subscription?.payment_day) || 1));
+          const billDay = Math.min(28, Math.max(0, Number(userSub?.billing_day ?? metaSub?.payment_day ?? metaSub?.billing_day ?? prevSt?.subscription?.payment_day ?? 1) || 0));
 
           const rawPrice = Number(meta?.price ?? metaSub?.price ?? prevSt?.price ?? 15000);
           const rawSum = metaSub?.robokassa_sum ?? prevSt?.subscription?.robokassa_sum ?? formatRublesFromNumber(rawPrice);
@@ -3089,6 +3089,21 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
         saveAppData();
         triggerHaptic('success');
         showToast(`Забронировано на ${startTime}! Остаток: ${activeStudent.subscription.remaining}`);
+
+        const trainerName = escapeTgHtml(appData?.trainer_profile?.full_name || 'Степан');
+        const studentName = escapeTgHtml(activeStudent.full_name || 'Ученик');
+        const balanceStr = `${activeStudent.subscription.remaining} из ${activeStudent.subscription.total}`;
+        const bookedHtml = buildTelegramEventCard({
+          title: `✅ <b>Запись на тренировку</b>`,
+          dateTimeLine: `${formatHumanDate(isoDate)} • ${startTime}`,
+          quoteLines: [
+            `👤 ${studentName} • Тренер: ${trainerName}`,
+            `🎟 Остаток: ${balanceStr}`
+          ]
+        });
+        sendTelegramClientNotification(activeStudent, bookedHtml, 'booking_notify');
+        sendTelegramTrainerNotification(bookedHtml);
+
         renderApp();
 
         // Фоновый запрос в базу
@@ -3108,19 +3123,6 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
               persistStudentToSupabase(activeStudent)
             ]);
             saveAppData();
-            const trainerName = escapeTgHtml(appData?.trainer_profile?.full_name || 'Степан');
-            const studentName = escapeTgHtml(activeStudent.full_name || 'Ученик');
-            const balanceStr = `${activeStudent.subscription.remaining} из ${activeStudent.subscription.total}`;
-            const bookedHtml = buildTelegramEventCard({
-              title: `✅ <b>Запись на тренировку</b>`,
-              dateTimeLine: `${formatHumanDate(isoDate)} • ${startTime}`,
-              quoteLines: [
-                `👤 ${studentName} • Тренер: ${trainerName}`,
-                `🎟 Остаток: ${balanceStr}`
-              ]
-            });
-            sendTelegramClientNotification(activeStudent, bookedHtml, 'booking_notify');
-            sendTelegramTrainerNotification(bookedHtml);
           } else {
             // В случае сетевой ошибки возвращаем слот и занятие назад
             activeStudent.active_bookings = activeStudent.active_bookings.filter(b => b.id !== tempId);
@@ -3294,7 +3296,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
                 `;
               })()}
             <p class="text-[11px] text-[#8B949E] mt-2">
-              <span>День счёта: ${sub.payment_day}-е число</span>
+              <span>${Number(sub.payment_day) === 0 ? 'День счёта: без конкретной даты' : `День счёта: ${sub.payment_day}-е число`}</span>
             </p>
           </div>
 
@@ -4945,7 +4947,8 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
     st.subscription.used_sessions = Math.max(0, newTotal - currentRem);
   }
       if (dayEl && dayEl.value !== '') {
-        const newDay = Math.min(28, Math.max(1, parseInt(dayEl.value, 10) || 1));
+        const parsedDay = parseInt(dayEl.value, 10);
+        const newDay = isNaN(parsedDay) ? 1 : Math.min(28, Math.max(0, parsedDay));
         st.subscription.payment_day = newDay;
         st.subscription.billing_day = newDay;
       }
@@ -4977,7 +4980,8 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
       if (!targetStudent) return;
 
       const rawDay = maybeDayVal !== undefined ? maybeDayVal : studentIdOrDayVal;
-      const newDay = Math.min(28, Math.max(1, Number(rawDay) || 1));
+      const parsedDay = parseInt(rawDay, 10);
+      const newDay = isNaN(parsedDay) ? 1 : Math.min(28, Math.max(0, parsedDay));
       if (!targetStudent.subscription) targetStudent.subscription = {};
       targetStudent.subscription.payment_day = newDay;
       targetStudent.subscription.billing_day = newDay;
@@ -4985,7 +4989,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
       const selectEl = document.getElementById('tr-mgmt-payment-day');
       if (selectEl) selectEl.value = String(newDay);
       const badgeEl = document.getElementById('tr-mgmt-payment-day-badge');
-      if (badgeEl) badgeEl.textContent = `${newDay}-е число`;
+      if (badgeEl) badgeEl.textContent = newDay === 0 ? 'Без даты' : `${newDay}-е число`;
 
       const targetUserId = toValidUuidOrNull(targetStudent.supabase_id || targetStudent.id);
       await waitForSupabaseClient();
@@ -4995,12 +4999,12 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
           if (subUuid) {
             await supabaseClient
               .from('subscriptions')
-              .update({ billing_day: Number(newDay) || 1 })
+              .update({ billing_day: newDay })
               .eq('id', subUuid);
           } else {
             await supabaseClient
               .from('subscriptions')
-              .update({ billing_day: Number(newDay) || 1 })
+              .update({ billing_day: newDay })
               .eq('student_id', targetUserId);
           }
         } catch (err) {
@@ -5010,7 +5014,7 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
 
       await persistStudentToSupabase(targetStudent);
       triggerHaptic('light');
-      showToast(`День выставления счёта сохранён в базе: ${newDay}-е число месяца`);
+      showToast(newDay === 0 ? 'День выставления счёта: без конкретной даты' : `День выставления счёта сохранён в базе: ${newDay}-е число месяца`);
     }
 
 
@@ -5084,7 +5088,9 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
 
             <div class="px-3.5 py-2.5 rounded-xl bg-[#0D1117] border border-[#30363D] flex items-center justify-between gap-2">
               <span class="text-xs font-semibold text-white">
-                Индивидуальный день выставления счёта: <strong class="text-[#00E676]">${sub.payment_day}-е число месяца</strong>
+                ${Number(sub.payment_day) === 0
+                  ? 'Оплата абонемента: <strong class="text-[#00E676]">без конкретной даты</strong>'
+                  : `Индивидуальный день выставления счёта: <strong class="text-[#00E676]">${sub.payment_day}-е число месяца</strong>`}
               </span>
               <i data-lucide="lock" class="w-3.5 h-3.5 text-[#8B949E] shrink-0"></i>
             </div>
@@ -5101,12 +5107,23 @@ async function uploadVideoMediaToTelegram(fileOrBlob, captionText = '') {
                   <span>💳 ОПЛАТИТЬ АБОНЕМЕНТ</span>
                 </a>
               </div>
+            ` : (Number(sub.payment_day) === 0 ? `
+              ${sub.robokassa_url ? `
+                <a href="${sub.robokassa_url}" target="_blank" rel="noopener noreferrer" onclick="triggerHaptic('success')" class="w-full py-3 rounded-xl bg-gradient-to-r from-[#10B981] to-[#00E676] text-[#090C10] font-extrabold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-neon hover:brightness-110 transition">
+                  <span>💳 ОПЛАТИТЬ АБОНЕМЕНТ</span>
+                </a>
+              ` : `
+                <div class="p-3 rounded-xl bg-[#0D1117] border border-[#30363D]/80 text-[11px] text-[#8B949E] leading-relaxed flex items-start gap-2.5">
+                  <i data-lucide="info" class="w-4 h-4 text-[#8B949E] shrink-0 mt-0.5"></i>
+                  <span>Оплата производится по договорённости с тренером без привязки к конкретной дате.</span>
+                </div>
+              `}
             ` : `
               <div class="p-3 rounded-xl bg-[#0D1117] border border-[#30363D]/80 text-[11px] text-[#8B949E] leading-relaxed flex items-start gap-2.5">
                 <i data-lucide="info" class="w-4 h-4 text-[#8B949E] shrink-0 mt-0.5"></i>
                 <span>Счёт формируется ${sub.payment_day}-го числа каждого месяца. Ссылка на оплату активна ровно 24 часа</span>
               </div>
-            `}
+            `)}
 
             <div class="space-y-1.5 pt-1">
               <span class="text-[11px] font-bold uppercase text-[#8B949E]">История абонементов</span>
@@ -6412,7 +6429,7 @@ function copyInviteCode(code, name = '') {
           const subPayload = {
             total_sessions: Number(st.subscription?.total_sessions ?? st.subscription?.total ?? 8) || 0,
             used_sessions: Number(st.subscription?.used_sessions ?? st.subscription?.used ?? 0) || 0,
-            billing_day: Number(st.subscription?.billing_day ?? st.subscription?.payment_day ?? 1) || 1,
+            billing_day: Number(st.subscription?.billing_day ?? st.subscription?.payment_day ?? 0) || 0,
             session_duration_minutes: Number(st.session_duration) || 60
           };
           if (subUuid) {
@@ -6943,11 +6960,12 @@ function copyInviteCode(code, name = '') {
             <div class="bg-[#161B22] border border-[#30363D] rounded-2xl p-4 space-y-3">
               <div class="flex items-center justify-between">
                 <h3 class="text-xs font-bold uppercase tracking-wider text-[#00E676]">3. Контакт Telegram и оплата</h3>
-                <span class="text-[11px] text-[#8B949E]">День счёта: <strong id="tr-mgmt-payment-day-badge" class="text-white">${st.subscription.payment_day}-е число</strong></span>
+                <span class="text-[11px] text-[#8B949E]">День счёта: <strong id="tr-mgmt-payment-day-badge" class="text-white">${Number(st.subscription.payment_day) === 0 ? 'Без даты' : st.subscription.payment_day + '-е число'}</strong></span>
               </div>
               <div>
                 <label class="block text-[11px] text-[#8B949E] mb-1">Индивидуальный день выставления счёта</label>
                 <select id="tr-mgmt-payment-day" onchange="updateStudentPaymentDay('${st.id}', this.value)" class="w-full bg-[#090C10] border border-[#30363D] focus:border-[#00E676] rounded-xl px-3 py-2 text-xs font-bold text-white outline-none">
+                  <option value="0" ${Number(st.subscription.payment_day) === 0 ? 'selected' : ''}>Без конкретной даты</option>
                   ${Array.from({ length: 28 }, (_, idx) => idx + 1).map(d => `<option value="${d}" ${Number(st.subscription.payment_day) === d ? 'selected' : ''}>${d}-е число месяца</option>`).join('')}
                 </select>
               </div>
